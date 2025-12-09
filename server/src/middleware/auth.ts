@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { auth } from '../config/firebase';
+import { supabase } from '../config/supabase';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -20,11 +20,17 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
   const token = authHeader.split(' ')[1];
 
   try {
-    const decodedToken = await auth.verifyIdToken(token);
+    // Verify token using Supabase
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+      throw error || new Error('No user found');
+    }
+
     req.user = {
-      uid: decodedToken.uid,
-      email: decodedToken.email,
-      phone_number: decodedToken.phone_number,
+      uid: user.id,
+      email: user.email,
+      phone_number: user.phone,
     };
     next();
   } catch (error) {
