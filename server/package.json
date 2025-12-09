@@ -17,6 +17,7 @@
     "@supabase/supabase-js": "^2.86.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
+    "expo-server-sdk": "^4.0.0",
     "express": "^5.2.1",
     "multer": "^2.0.2",
     "uuid": "^13.0.0"

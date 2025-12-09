@@ -8,11 +8,13 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 import mediaRoutes from './routes/media';
+import notificationRoutes from './routes/notifications';
 
 app.use(cors());
 app.use(express.json());
 
 app.use('/media', mediaRoutes);
+app.use('/notifications', notificationRoutes);
 
 app.get('/', (req, res) => {
   res.send('RealChat Backend is running');
