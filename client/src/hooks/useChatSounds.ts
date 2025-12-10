@@ -1,5 +1,6 @@
 import { useAudioPlayer } from 'expo-audio';
 import { useEffect } from 'react';
+import { AppState } from 'react-native';
 
 export const useChatSounds = () => {
   // Load sounds
@@ -15,7 +16,7 @@ export const useChatSounds = () => {
   };
 
   const playReceiveSound = () => {
-    if (receiveSound) {
+    if (receiveSound && AppState.currentState === 'active') {
       receiveSound.seekTo(0);
       receiveSound.play();
     }

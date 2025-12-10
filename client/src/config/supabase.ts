@@ -35,6 +35,7 @@ export interface Chat {
   id: string;
   created_at: string;
   updated_at: string;
+  auto_delete_preference?: 'off' | 'close' | '24h' | '7d';
 }
 
 export interface Message {
@@ -43,6 +44,8 @@ export interface Message {
   user_id: string;
   text: string | null;
   image_url: string | null;
+  audio_url?: string | null;
+  type?: 'text' | 'image' | 'system' | 'audio';
   is_read: boolean;
   reply_to_id: string | null;
   created_at: string;

@@ -5,12 +5,23 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { supabase } from '../config/supabase';
 
+import { contentState } from '../utils/contentState';
+
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
+  handleNotification: async (notification) => {
+    const data = notification.request.content.data;
+    const isCurrentChat = data?.chatId && data.chatId === contentState.activeChatId;
+    
+    return {
+      shouldShowAlert: !isCurrentChat,
+      shouldPlaySound: false,
+      shouldSetBadge: false,
+      // @ts-ignore: Required by some versions
+      shouldShowBanner: !isCurrentChat,
+      // @ts-ignore: Required by some versions
+      shouldShowList: !isCurrentChat,
+    };
+  },
 });
 
 export const usePushNotifications = () => {
@@ -129,6 +140,8 @@ export const usePushNotifications = () => {
           }
         } catch (e) {
           console.error('Error sending reply:', e);
+        } finally {
+          await Notifications.dismissNotificationAsync(response.notification.request.identifier);
         }
       }
     });

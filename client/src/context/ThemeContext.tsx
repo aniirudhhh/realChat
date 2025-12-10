@@ -27,7 +27,7 @@ const LIGHT_COLORS = {
 
 // Dark Theme Colors
 const DARK_COLORS = {
-  background: '#212529',
+  background: '#101010',
   surface: '#343a40',
   surfaceSecondary: '#495057',
   text: '#f8f9fa',
@@ -38,8 +38,8 @@ const DARK_COLORS = {
   online: '#22c55e',
   danger: '#ef4444',
   warning: '#f59e0b',
-  inputBackground: '#343a40',
-  headerBackground: '#212529',
+  inputBackground: '#1e1e1e',
+  headerBackground: '#101010',
   bubbleMe: '#495057',
   bubbleOther: '#343a40',
   bubbleTextMe: '#f8f9fa',

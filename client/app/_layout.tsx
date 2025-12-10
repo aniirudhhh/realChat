@@ -99,7 +99,18 @@ function PushNotificationHandler() {
   return null;
 }
 
+import { useFonts, Lato_400Regular, Lato_700Bold } from '@expo-google-fonts/lato';
+
 export default function RootLayout() {
+  const [fontsLoaded] = useFonts({
+    Lato_400Regular,
+    Lato_700Bold,
+  });
+
+  if (!fontsLoaded) {
+    return null;
+  }
+
   return (
     <ThemeProvider>
       <ToastProvider>

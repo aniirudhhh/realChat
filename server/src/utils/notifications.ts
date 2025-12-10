@@ -27,6 +27,7 @@ export const sendExpoNotification = async (
   if (chatId) {
     messages[0].channelId = 'default';
     // Using data to pass a collapsible identifier
+    messages[0].collapseId = chatId;
     messages[0]._displayInForeground = true;
   }
 
