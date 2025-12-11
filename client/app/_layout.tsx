@@ -93,18 +93,19 @@ function RootLayoutContent() {
 }
 
 import { usePushNotifications } from '../src/hooks/usePushNotifications';
+import { useFonts } from 'expo-font';
+import { Lato_400Regular, Lato_700Bold } from '@expo-google-fonts/lato';
 
 function PushNotificationHandler() {
   usePushNotifications();
   return null;
 }
 
-import { useFonts, Lato_400Regular, Lato_700Bold } from '@expo-google-fonts/lato';
-
 export default function RootLayout() {
   const [fontsLoaded] = useFonts({
     Lato_400Regular,
     Lato_700Bold,
+    'Sebino-Regular': require('../assets/fonts/Sebino-Regular.ttf'),
   });
 
   if (!fontsLoaded) {

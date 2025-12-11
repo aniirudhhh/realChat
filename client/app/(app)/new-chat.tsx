@@ -24,39 +24,36 @@ export default function NewChatScreen() {
     setCurrentUserId(user?.id || null);
   };
 
-  // Search users
+  // Clear users when search is cleared
   useEffect(() => {
-    if (!currentUserId) return;
-    
     if (searchQuery.trim().length === 0) {
       setUsers([]);
-      return;
     }
+  }, [searchQuery]);
 
-    const timer = setTimeout(async () => {
-      setLoading(true);
-      try {
-        const { data, error } = await supabase
-          .from('users')
-          .select('*')
-          .or(`username.ilike.%${searchQuery}%,display_name.ilike.%${searchQuery}%`)
-          .neq('id', currentUserId)
-          .limit(10);
+  const performSearch = async () => {
+    if (!currentUserId || searchQuery.trim().length === 0) return;
+    
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .or(`username.ilike.%${searchQuery}%,display_name.ilike.%${searchQuery}%`)
+        .neq('id', currentUserId)
+        .limit(10);
 
-        if (error) {
-          console.error('Search error:', error);
-        } else {
-          setUsers(data || []);
-        }
-      } catch (e) {
-        console.error('Search error:', e);
-      } finally {
-        setLoading(false);
+      if (error) {
+        console.error('Search error:', error);
+      } else {
+        setUsers(data || []);
       }
-    }, 500);
-
-    return () => clearTimeout(timer);
-  }, [searchQuery, currentUserId]);
+    } catch (e) {
+      console.error('Search error:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const startChat = async (selectedUser: User) => {
     if (!currentUserId) return;
@@ -86,7 +83,10 @@ export default function NewChatScreen() {
       // Create new chat
       const { data: newChat, error: chatError } = await supabase
         .from('chats')
-        .insert({})
+        .insert({
+           status: 'request',
+           created_by: currentUserId
+        })
         .select()
         .single();
 
@@ -131,7 +131,9 @@ export default function NewChatScreen() {
 
       {/* Search Input */}
       <View style={[styles.searchContainer, { backgroundColor: colors.inputBackground }]}>
-        <Ionicons name="search" size={20} color={colors.textMuted} />
+        <TouchableOpacity onPress={performSearch}>
+           <Ionicons name="search" size={20} color={colors.textMuted} />
+        </TouchableOpacity>
         <TextInput 
           style={[styles.input, { color: colors.text }]}
           placeholder="Search people..."
@@ -139,6 +141,8 @@ export default function NewChatScreen() {
           value={searchQuery}
           onChangeText={setSearchQuery}
           autoFocus
+          onSubmitEditing={performSearch}
+          returnKeyType="search"
         />
       </View>
 
@@ -150,24 +154,30 @@ export default function NewChatScreen() {
           data={users}
           keyExtractor={item => item.id}
           renderItem={({ item }) => (
-            <TouchableOpacity 
-              style={[styles.userItem, { borderBottomColor: colors.border }]} 
-              onPress={() => startChat(item)}
-            >
-              {item.photo_url ? (
-                <Image source={{ uri: item.photo_url }} style={styles.avatar} />
-              ) : (
-                <View style={[styles.avatar, { backgroundColor: colors.surfaceSecondary, justifyContent: 'center', alignItems: 'center' }]}>
-                  <Text style={{ color: colors.text, fontWeight: 'bold' }}>
-                    {item.display_name?.[0] || '?'}
-                  </Text>
+            <View style={[styles.userItem, { borderBottomColor: colors.border }]}>
+               <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                {item.photo_url ? (
+                  <Image source={{ uri: item.photo_url }} style={styles.avatar} />
+                ) : (
+                  <View style={[styles.avatar, { backgroundColor: colors.surfaceSecondary, justifyContent: 'center', alignItems: 'center' }]}>
+                    <Text style={{ color: colors.text, fontWeight: 'bold' }}>
+                      {item.display_name?.[0] || '?'}
+                    </Text>
+                  </View>
+                )}
+                <View>
+                  <Text style={[styles.name, { color: colors.text }]}>{item.display_name || item.username}</Text>
+                  <Text style={[styles.username, { color: colors.textMuted }]}>@{item.username || 'user'}</Text>
                 </View>
-              )}
-              <View>
-                <Text style={[styles.name, { color: colors.text }]}>{item.display_name || item.username}</Text>
-                <Text style={[styles.username, { color: colors.textMuted }]}>@{item.username || 'user'}</Text>
-              </View>
-            </TouchableOpacity>
+               </View>
+
+              <TouchableOpacity 
+                style={{ backgroundColor: colors.accent, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 }}
+                onPress={() => startChat(item)}
+              >
+                <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 14 }}>Chat</Text>
+              </TouchableOpacity>
+            </View>
           )}
           ListEmptyComponent={
             searchQuery.length > 0 ? (
@@ -197,8 +207,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     margin: 16,
-    padding: 12,
-    borderRadius: 12
+    paddingHorizontal: 16,
+    paddingVertical: 2,
+    borderRadius: 25
   },
   input: {
     flex: 1,

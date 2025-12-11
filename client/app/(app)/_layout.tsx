@@ -144,6 +144,12 @@ export default function AppLayout() {
           headerShown: false,
         }} 
       />
+      <Stack.Screen 
+        name="requests" 
+        options={{ 
+          headerShown: false,
+        }} 
+      />
       <Stack.Screen name="settings" options={{ title: 'Settings' }} />
     </Stack>
   );

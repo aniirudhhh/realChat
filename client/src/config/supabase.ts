@@ -36,6 +36,8 @@ export interface Chat {
   created_at: string;
   updated_at: string;
   auto_delete_preference?: 'off' | 'close' | '24h' | '7d';
+  status: 'active' | 'request' | 'blocked';
+  created_by: string | null;
 }
 
 export interface Message {

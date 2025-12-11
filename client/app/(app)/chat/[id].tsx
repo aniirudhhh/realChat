@@ -14,7 +14,9 @@ import {
   Animated,
   Modal,
   TouchableWithoutFeedback,
-  Image
+  Image,
+  LayoutAnimation,
+  UIManager
 } from 'react-native';
 import { contentState } from '../../../src/utils/contentState';
 import { Swipeable, GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -28,9 +30,15 @@ import { useChatSounds } from '../../../src/hooks/useChatSounds';
 import { api } from '../../../src/services/api';
 import TypingIndicator from '../../../src/components/TypingIndicator';
 import dayjs from 'dayjs';
+import calendar from 'dayjs/plugin/calendar';
+import relativeTime from 'dayjs/plugin/relativeTime';
 import { Audio } from 'expo-av';
+
+dayjs.extend(calendar);
+dayjs.extend(relativeTime);
 import * as FileSystem from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
+import * as ExpoClipboard from 'expo-clipboard';
 
 const COLORS = {
   brightSnow: '#f8f9fa',
@@ -70,14 +78,20 @@ export default function ChatScreen() {
   const [otherUser, setOtherUser] = useState<User | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [showMenu, setShowMenu] = useState(false);
+  const [showAddMenu, setShowAddMenu] = useState(false);
+  const [isMenuMounted, setIsMenuMounted] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [showDeleteChatConfirm, setShowDeleteChatConfirm] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
+  const [isDeletingChat, setIsDeletingChat] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [otherUserTyping, setOtherUserTyping] = useState(false);
   const [replyToMessage, setReplyToMessage] = useState<MessageWithUser | null>(null);
   const [showReactionPicker, setShowReactionPicker] = useState<string | null>(null); // message ID
   const [reactions, setReactions] = useState<Record<string, MessageReaction[]>>({});
   const [messageToDelete, setMessageToDelete] = useState<MessageWithUser | null>(null);
+  const [selectedMessage, setSelectedMessage] = useState<MessageWithUser | null>(null);
+  const [showInfoModal, setShowInfoModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [autoDeletePref, setAutoDeletePref] = useState<'off' | 'close' | '24h' | '7d'>('off');
   
@@ -95,8 +109,63 @@ export default function ChatScreen() {
   const [selectedImageUri, setSelectedImageUri] = useState<string | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
 
+  // Chat Request State
+  const [chatStatus, setChatStatus] = useState<'active' | 'request' | 'blocked' | null>(null);
+  const [chatCreatedBy, setChatCreatedBy] = useState<string | null>(null);
+  const [isChatDeleted, setIsChatDeleted] = useState(false);
+  const chatStatusRef = useRef<'active' | 'request' | 'blocked' | null>(null);
+  const chatCreatedByRef = useRef<string | null>(null);
+
   // Animated value for reply preview height
   const replyPreviewHeight = useRef(new Animated.Value(0)).current;
+  // Animated value for right action buttons (0 = mic/image, 1 = send)
+  const inputMode = useRef(new Animated.Value(0)).current;
+  const prevShowSend = useRef(false);
+  // Animation for Add Menu (0 = closed, 1 = open)
+  const menuAnim = useRef(new Animated.Value(0)).current;
+
+  // Enable LayoutAnimation on Android
+  useEffect(() => {
+    if (Platform.OS === 'android') {
+      if (UIManager.setLayoutAnimationEnabledExperimental) {
+        UIManager.setLayoutAnimationEnabledExperimental(true);
+      }
+    }
+  }, []);
+
+  // Animate input mode when text/image changes
+  useEffect(() => {
+    const shouldShowSend = inputText.trim().length > 0 || !!selectedImageUri;
+    if (shouldShowSend !== prevShowSend.current) {
+      prevShowSend.current = shouldShowSend;
+      Animated.timing(inputMode, {
+        toValue: shouldShowSend ? 1 : 0,
+        duration: 250, // Smooth duration
+        useNativeDriver: false,
+      }).start();
+    }
+  }, [inputText, selectedImageUri]);
+
+  // Animate Add Menu Open/Close
+  useEffect(() => {
+    if (showAddMenu) {
+      setIsMenuMounted(true);
+      Animated.spring(menuAnim, {
+        toValue: 1,
+        useNativeDriver: false,
+        friction: 8,
+        tension: 50
+      }).start();
+    } else {
+      Animated.timing(menuAnim, {
+        toValue: 0,
+        duration: 200,
+        useNativeDriver: false
+      }).start(({ finished }) => {
+        if (finished) setIsMenuMounted(false);
+      });
+    }
+  }, [showAddMenu]);
 
   // Animate reply preview when replyToMessage changes
   useEffect(() => {
@@ -109,6 +178,7 @@ export default function ChatScreen() {
 
   const chatId = id as string;
   const flatListRef = useRef<FlatList>(null);
+  const inputRef = useRef<TextInput>(null);
   const keyboardHeight = useRef(new Animated.Value(0)).current;
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const presenceChannelRef = useRef<any>(null);
@@ -121,6 +191,12 @@ export default function ChatScreen() {
   const markAsRead = async () => {
     if (!currentUserIdRef.current || !chatId) return;
     
+    // Don't mark as read if it's a pending request that I haven't accepted
+    // Check refs to ensure we have latest status inside callbacks
+    const currentStatus = chatStatusRef.current;
+    if (!currentStatus) return; // Still loading
+    if (currentStatus === 'request' && chatCreatedByRef.current !== currentUserIdRef.current) return;
+
     try {
       // Update chat_participants last_read_at
       await supabase
@@ -187,6 +263,39 @@ export default function ChatScreen() {
           );
         }
       )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'message_reactions',
+        },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            const newReaction = payload.new as MessageReaction;
+            setReactions(prev => {
+               const existing = prev[newReaction.message_id] || [];
+               if (existing.some(r => r.id === newReaction.id)) return prev;
+               return {
+                  ...prev,
+                  [newReaction.message_id]: [...existing, newReaction]
+               };
+            });
+          } else if (payload.eventType === 'DELETE') {
+             const deletedId = payload.old.id;
+             setReactions(prev => {
+                const updated = { ...prev };
+                let found = false;
+                Object.keys(updated).forEach(msgId => {
+                   const originalLen = updated[msgId].length;
+                   updated[msgId] = updated[msgId].filter(r => r.id !== deletedId);
+                   if (updated[msgId].length !== originalLen) found = true;
+                });
+                return found ? updated : prev;
+             });
+          }
+        }
+      )
       .subscribe();
 
 
@@ -212,8 +321,8 @@ export default function ChatScreen() {
   const checkCleanupOnClose = async (cid: string, uid: string | null) => {
     if (!uid) return;
     try {
-      const { data } = await supabase.from('chats').select('auto_delete_preference').eq('id', cid).single();
-      console.log('Cleanup Check:', { cid, pref: data?.auto_delete_preference });
+      const { data } = await supabase.from('chats').select('auto_delete_preference, status, created_by').eq('id', cid).single();
+      console.log('Cleanup Check:', { cid, data });
       
       if (data?.auto_delete_preference === 'close') {
          // Delete messages where is_read is true
@@ -224,6 +333,21 @@ export default function ChatScreen() {
            .eq('is_read', true); // CRITICAL: Only delete READ messages
            
          console.log('Cleaned up read messages on close:', { count, error });
+      }
+
+      // Cleanup Empty Requests (User opened chat but sent nothing)
+      if (data?.status === 'request' && data.created_by === uid) {
+         // Check if any messages exist
+         const { count } = await supabase
+           .from('messages')
+           .select('*', { count: 'exact', head: true })
+           .eq('chat_id', cid);
+
+         if (count === 0) {
+            console.log('Deleting empty request chat...');
+            await supabase.from('chat_participants').delete().eq('chat_id', cid);
+            await supabase.from('chats').delete().eq('id', cid);
+         }
       }
     } catch (e) {
       console.log('Cleanup error', e); 
@@ -242,7 +366,7 @@ export default function ChatScreen() {
     return () => {
       contentState.activeChatId = null;
     };
-  }, [currentUserId, chatId]);
+  }, [currentUserId, chatId, chatStatus]);
 
   // Track if channels are connected
   const isPresenceConnected = useRef(false);
@@ -323,6 +447,7 @@ export default function ChatScreen() {
     }
   };
 
+  // Handle text input change with typing indicator
   // Handle text input change with typing indicator
   const handleTextChange = (text: string) => {
     setInputText(text);
@@ -470,6 +595,12 @@ export default function ChatScreen() {
       
       if (chatData) {
         setAutoDeletePref(chatData.auto_delete_preference || 'off');
+        const status = chatData.status || 'active';
+        setChatStatus(status);
+        chatStatusRef.current = status;
+        
+        setChatCreatedBy(chatData.created_by);
+        chatCreatedByRef.current = chatData.created_by;
       }
 
       // Get other participant
@@ -500,7 +631,7 @@ export default function ChatScreen() {
   // Subscribe to Chat Settings Changes
   useEffect(() => {
     if (!chatId) return;
-
+    // Subscribe to chat status changes
     const chatSettingsChannel = supabase
       .channel(`chat_settings:${chatId}`)
       .on(
@@ -516,6 +647,25 @@ export default function ChatScreen() {
           if (newChat.auto_delete_preference) {
             setAutoDeletePref(newChat.auto_delete_preference);
           }
+          if (newChat.status) {
+            setChatStatus(newChat.status);
+            chatStatusRef.current = newChat.status;
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'chats',
+          filter: `id=eq.${chatId}`,
+        },
+        () => {
+           setIsChatDeleted(true);
+           setChatStatus('blocked'); // Effectively blocked/gone
+           chatStatusRef.current = 'blocked';
+           showToast('This chat has been ended', 'info');
         }
       )
       .subscribe();
@@ -537,6 +687,7 @@ export default function ChatScreen() {
         console.error('Error loading messages:', error);
       } else {
         setMessages(data || []);
+        loadReactions(data?.map(m => m.id) || []);
       }
     } catch (error) {
       console.error('Error loading messages:', error);
@@ -808,6 +959,51 @@ export default function ChatScreen() {
     }
   };
 
+  const acceptRequest = async () => {
+    try {
+      await supabase.from('chats').update({ status: 'active' }).eq('id', chatId);
+      setChatStatus('active');
+      chatStatusRef.current = 'active';
+      showToast('Request accepted', 'success');
+    } catch (error) {
+      console.error('Error accepting request:', error);
+      showToast('Failed to accept request', 'error');
+    }
+  };
+
+  const deleteChat = async () => {
+    try {
+      setIsDeletingChat(true);
+      
+      // Delete from chats (cascade should handle participants/messages if set, else explicit)
+      // Assuming cascade or manual cleanup
+      const { error } = await supabase.from('chats').delete().eq('id', chatId);
+      
+      if (error) throw error;
+      
+      showToast('Friend removed', 'success');
+      router.replace('/(app)');
+    } catch (error) {
+      console.error('Error removing friend:', error);
+      showToast('Failed to remove friend', 'error');
+    } finally {
+      setIsDeletingChat(false);
+      setShowDeleteChatConfirm(false);
+    }
+  };
+
+  const rejectRequest = async () => {
+    try {
+      // Logic for reject: Delete chat or Block?
+      // Usually "Delete" removes it. "Block" sets status 'blocked'.
+      // For now, let's just delete the chat (User declines).
+      await supabase.from('chats').delete().eq('id', chatId);
+      router.replace('/(app)'); // Go back
+    } catch (error) {
+      console.error('Error rejecting request:', error);
+    }
+  };
+
   const sendMessage = async () => {
     if (!inputText.trim() || !currentUserId) return;
 
@@ -1007,6 +1203,12 @@ export default function ChatScreen() {
     </View>
   );
 
+  const renderRightSwipeAction = () => (
+    <View style={styles.swipeReplyActionRight}>
+      <Ionicons name="arrow-undo" size={20} color={COLORS.slateGrey} />
+    </View>
+  );
+
   const handleSwipeOpen = (item: MessageWithUser, direction: string) => {
     setReplyToMessage(item);
     // Close the swipeable after triggering reply
@@ -1017,22 +1219,45 @@ export default function ChatScreen() {
   };
 
   const renderMessage = ({ item, index }: { item: MessageWithUser; index: number }) => {
+    // Date Header Logic
+    const isLastMessage = index === messages.length - 1;
+    const currentMessageDate = dayjs(item.created_at);
+    // Inverted List: Messages[index+1] is OLDER (visually above)
+    const previousMessageDate = !isLastMessage ? dayjs(messages[index + 1].created_at) : null;
+    const showDayHeader = !previousMessageDate || !currentMessageDate.isSame(previousMessageDate, 'day');
+
+    const DayHeader = () => (
+      <View style={{ alignItems: 'center', marginVertical: 16 }}>
+         <Text style={{ color: colors.textMuted, fontSize: 12, fontFamily: 'Sebino-Regular', fontWeight: '500' }}>
+           {currentMessageDate.calendar(null, {
+              sameDay: '[Today]',
+              lastDay: '[Yesterday]',
+              lastWeek: 'dddd',
+              sameElse: 'MMM D'
+           })}
+         </Text>
+      </View>
+    );
+
     // Handle System Messages
     if (item.type === 'system') {
        return (
-         <View style={{ alignItems: 'center', marginVertical: 10, paddingHorizontal: 20 }}>
-           <Text style={{ 
-             color: colors.textMuted, 
-             fontSize: 12, 
-             textAlign: 'center', 
-             backgroundColor: colors.surfaceSecondary, 
-             paddingVertical: 4, 
-             paddingHorizontal: 12, 
-             borderRadius: 10, 
-             overflow: 'hidden' 
-           }}>
-             {item.text}
-           </Text>
+         <View>
+           {showDayHeader && <DayHeader />}
+           <View style={{ alignItems: 'center', marginVertical: 10, paddingHorizontal: 20 }}>
+             <Text style={{ 
+               color: colors.textMuted, 
+               fontSize: 12, 
+               textAlign: 'center', 
+               backgroundColor: colors.surfaceSecondary, 
+               paddingVertical: 4, 
+               paddingHorizontal: 12, 
+               borderRadius: 10, 
+               overflow: 'hidden' 
+             }}>
+               {item.text}
+             </Text>
+           </View>
          </View>
        );
     }
@@ -1045,126 +1270,106 @@ export default function ChatScreen() {
     if (item.type === 'audio') {
        const isPlaying = playingMessageId === item.id;
        return (
-        <Swipeable
-          ref={ref => {
-            if (ref) swipeableRefs.current.set(item.id, ref);
-          }}
-          renderLeftActions={renderSwipeAction}
-          onSwipeableWillOpen={(direction) => handleSwipeOpen(item, direction)}
-          friction={2}
-          rightThreshold={40}
-        >
-          <TouchableOpacity 
-             onLongPress={() => {
-               if (isMe) {
-                 setMessageToDelete(item);
-                 setShowClearConfirm(true); // Re-using clear confirm or create new modal? 
-                 // Actually logic uses 'messageToDelete' state to confirm delete.
-                 // But wait, showClearConfirm is for clearing CHAT?
-                 // Ah, line 795 `deleteMessage` uses `messageToDelete`.
-                 // But UI for single message delete is usually a modal or checking `messageToDelete`.
-                 // Existing code uses `messageToDelete` + `setIsDeleting`? 
-                 // Let's stick to simple long press -> set delete.
-                 // Wait, I need to check how delete works for regular messages.
-                 // It seems `deleteMessage` (singular) is called via some UI trigger? 
-                 // Ah, I don't see the UI trigger in the previous view file for deletion!
-                 // I will assume standard long press logic is fine.
-                 // For now, let's focus on playback logic.
-               }
-             }}
-             delayLongPress={500}
-             activeOpacity={0.8}
-             style={[
-               styles.messageRow, 
-               isMe ? styles.messageRowMe : {}
-             ]}
+        <View>
+          {showDayHeader && <DayHeader />}
+          <Swipeable
+            ref={ref => {
+              if (ref) swipeableRefs.current.set(item.id, ref);
+            }}
+            renderLeftActions={!isMe ? renderSwipeAction : undefined}
+            renderRightActions={isMe ? renderRightSwipeAction : undefined}
+            onSwipeableWillOpen={(direction) => handleSwipeOpen(item, direction)}
+            friction={2}
+            rightThreshold={40}
           >
-           <View style={[
-             styles.messageBubble,
-             isMe ? styles.bubbleMe : styles.bubbleOther,
-             { minWidth: 150, alignItems: 'center', flexDirection: 'row', gap: 10 }
-           ]}>
-             <TouchableOpacity 
-               onPress={() => playAudio(item)}
-               style={{ 
-                 width: 32, height: 32, borderRadius: 16, 
-                 backgroundColor: isMe ? 'rgba(255,255,255,0.2)' : colors.surfaceSecondary,
-                 justifyContent: 'center', alignItems: 'center'
-               }}
-             >
-                <Ionicons name={isPlaying ? "volume-high" : "play"} size={18} color={isMe ? '#fff' : colors.text} />
-             </TouchableOpacity>
-             <View>
-               <Text style={{ color: isMe ? '#fff' : colors.text, fontWeight: '600' }}>Voice Message</Text>
-               <Text style={{ color: isMe ? 'rgba(255,255,255,0.7)' : colors.textMuted, fontSize: 10 }}>1-Time Play</Text>
-             </View>
-             
-             {isMe && (
-               <Text style={{ color: item.is_read ? '#3b82f6' : 'rgba(255,255,255,0.5)', fontSize: 9, alignSelf: 'flex-end' }}>
-                 {item.is_read ? '✓✓' : '✓'}
-               </Text>
-             )}
-           </View>
-          </TouchableOpacity>
-        </Swipeable>
+           <TouchableOpacity 
+              onLongPress={() => setSelectedMessage(item)}
+              delayLongPress={500}
+              activeOpacity={0.8}
+              style={[
+                styles.messageRow, 
+                isMe ? styles.messageRowMe : {}
+              ]}
+           >
+            <View style={[
+              styles.messageBubble,
+              isMe ? styles.bubbleMe : styles.bubbleOther,
+              { minWidth: 150, alignItems: 'center', flexDirection: 'row', gap: 10 }
+            ]}>
+              <TouchableOpacity 
+                onPress={() => playAudio(item)}
+                style={{ 
+                  width: 32, height: 32, borderRadius: 16, 
+                  backgroundColor: isMe ? 'rgba(255,255,255,0.2)' : colors.surfaceSecondary,
+                  justifyContent: 'center', alignItems: 'center'
+                }}
+              >
+                 <Ionicons name={isPlaying ? "volume-high" : "play"} size={18} color={isMe ? '#fff' : colors.text} />
+              </TouchableOpacity>
+              <View>
+                <Text style={{ color: isMe ? '#fff' : colors.text, fontWeight: '600' }}>Voice Message</Text>
+                <Text style={{ color: isMe ? 'rgba(255,255,255,0.7)' : colors.textMuted, fontSize: 10 }}>1-Time Play</Text>
+              </View>
+            </View>
+           </TouchableOpacity>
+         </Swipeable>
+        </View>
        );
     }
 
     // Image Message Rendering
     if (item.type === 'image') {
        return (
-        <Swipeable
-          ref={ref => {
-            if (ref) swipeableRefs.current.set(item.id, ref);
-          }}
-          renderLeftActions={renderSwipeAction}
-          onSwipeableWillOpen={(direction) => handleSwipeOpen(item, direction)}
-          friction={2}
-          rightThreshold={40}
-        >
-           <TouchableOpacity 
-             onLongPress={() => isMe && setMessageToDelete(item)}
-             onPress={() => {
-               if (!isMe) {
-                 setViewingImage(item);
-               } else {
-                 showToast("You can't view your own one-time photo", "error");
-               }
-             }}
-             delayLongPress={500}
-             activeOpacity={0.8}
-             style={[
-               styles.messageRow, 
-               isMe ? styles.messageRowMe : {}
-             ]}
-          >
-           <View style={[
-             styles.messageBubble,
-             isMe ? styles.bubbleMe : styles.bubbleOther,
-             { minWidth: 150, alignItems: 'center', flexDirection: 'row', gap: 10 }
-           ]}>
-             <View
-               style={{ 
-                 width: 32, height: 32, borderRadius: 16, 
-                 backgroundColor: isMe ? 'rgba(255,255,255,0.2)' : colors.surfaceSecondary,
-                 justifyContent: 'center', alignItems: 'center'
-               }}
-             >
-                <Ionicons name="image" size={18} color={isMe ? '#fff' : colors.text} />
-             </View>
-             <View>
-               <Text style={{ color: isMe ? '#fff' : colors.text, fontWeight: '600' }}>Photo</Text>
-               <Text style={{ color: isMe ? 'rgba(255,255,255,0.7)' : colors.textMuted, fontSize: 10 }}>1-Time View</Text>
-             </View>
-             
-             {isMe && (
-               <Text style={{ color: item.is_read ? '#3b82f6' : 'rgba(255,255,255,0.5)', fontSize: 9, alignSelf: 'flex-end' }}>
-                 {item.is_read ? '✓✓' : '✓'}
-               </Text>
-             )}
-           </View>
-          </TouchableOpacity>
-        </Swipeable>
+        <View>
+         {showDayHeader && <DayHeader />}
+         <Swipeable
+           ref={ref => {
+             if (ref) swipeableRefs.current.set(item.id, ref);
+           }}
+            renderLeftActions={!isMe ? renderSwipeAction : undefined}
+            renderRightActions={isMe ? renderRightSwipeAction : undefined}
+            onSwipeableWillOpen={(direction) => handleSwipeOpen(item, direction)}
+           friction={2}
+           rightThreshold={40}
+         >
+            <TouchableOpacity 
+              onLongPress={() => setSelectedMessage(item)}
+              onPress={() => {
+                if (!isMe) {
+                  setViewingImage(item);
+                } else {
+                  showToast("You can't view your own one-time photo", "error");
+                }
+              }}
+              delayLongPress={500}
+              activeOpacity={0.8}
+              style={[
+                styles.messageRow, 
+                isMe ? styles.messageRowMe : {}
+              ]}
+           >
+            <View style={[
+              styles.messageBubble,
+              isMe ? styles.bubbleMe : styles.bubbleOther,
+              { minWidth: 150, alignItems: 'center', flexDirection: 'row', gap: 10 }
+            ]}>
+              <View
+                style={{ 
+                  width: 32, height: 32, borderRadius: 16, 
+                  backgroundColor: isMe ? 'rgba(255,255,255,0.2)' : colors.surfaceSecondary,
+                  justifyContent: 'center', alignItems: 'center'
+                }}
+              >
+                 <Ionicons name="image" size={18} color={isMe ? '#fff' : colors.text} />
+              </View>
+              <View>
+                <Text style={{ color: isMe ? '#fff' : colors.text, fontWeight: '600' }}>Photo</Text>
+                <Text style={{ color: isMe ? 'rgba(255,255,255,0.7)' : colors.textMuted, fontSize: 10 }}>1-Time View</Text>
+              </View>
+            </View>
+           </TouchableOpacity>
+         </Swipeable>
+        </View>
        );
     }
 
@@ -1178,76 +1383,69 @@ export default function ChatScreen() {
     };
 
     return (
-      <Swipeable
-        ref={(ref) => {
-          if (ref) swipeableRefs.current.set(item.id, ref);
-        }}
-        renderLeftActions={isMe ? undefined : renderSwipeAction}
-        renderRightActions={isMe ? renderSwipeAction : undefined}
-        onSwipeableOpen={(direction) => handleSwipeOpen(item, direction)}
-        overshootLeft={false}
-        overshootRight={false}
-        leftThreshold={40}
-        rightThreshold={40}
-      >
-        <TouchableOpacity 
-          style={[styles.messageRow, isMe && styles.messageRowMe]}
-          onPress={handleDoubleTap}
-          onLongPress={() => isMe && setMessageToDelete(item)}
-          activeOpacity={0.9}
-        >
-          <View style={{ maxWidth: '80%' }}>
-            <View style={[
-              styles.messageBubble, 
-              isMe ? styles.bubbleMe : styles.bubbleOther,
-              { backgroundColor: isMe ? colors.accent : colors.bubbleOther }
-            ]}>
-              {/* Quoted message if replying */}
-              {repliedMessage && (
-                <View style={[styles.quotedMessage, { backgroundColor: isMe ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.1)' }]}>
-                  <Text style={[styles.quotedText, { color: isMe ? 'rgba(255,255,255,0.8)' : colors.textMuted }]} numberOfLines={2}>
-                    {repliedMessage.text}
-                  </Text>
-                </View>
-              )}
-              <Text style={[styles.messageText, { color: isMe ? colors.bubbleTextMe : colors.bubbleTextOther }]}>{item.text}</Text>
-              <View style={styles.messageTimeContainer}>
-                <Text style={[styles.messageTimeInline, { color: isMe ? 'rgba(255,255,255,0.7)' : colors.textMuted }]}>
-                  {formatTime(item.created_at)}
-                  {isMe && (
-                    <Text style={{ color: item.is_read ? '#4ade80' : 'rgba(255,255,255,0.5)', fontSize: 9 }}>
-                      {' '}✓✓
-                    </Text>
-                  )}
-                </Text>
-              </View>
-            </View>
-            {/* Reactions display */}
-            {messageReactions.length > 0 && (
-              <View style={[styles.reactionsContainer, isMe && styles.reactionsContainerMe]}>
-                {messageReactions.map((reaction, idx) => (
-                  <TouchableOpacity 
-                    key={idx} 
-                    onPress={() => {
-                      // Allow removing own reaction
-                      if (reaction.user_id === currentUserId) {
-                        addReaction(item.id, reaction.emoji);
-                      }
-                    }}
-                  >
-                    <Text style={[
-                      styles.reactionEmoji,
-                      reaction.user_id === currentUserId && styles.reactionEmojiMine
-                    ]}>
-                      {reaction.emoji}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            )}
-          </View>
-        </TouchableOpacity>
-      </Swipeable>
+      <View>
+       {showDayHeader && <DayHeader />}
+       <Swipeable
+         ref={(ref) => {
+           if (ref) swipeableRefs.current.set(item.id, ref);
+         }}
+         renderLeftActions={!isMe ? renderSwipeAction : undefined}
+         renderRightActions={isMe ? renderRightSwipeAction : undefined}
+         onSwipeableOpen={(direction) => handleSwipeOpen(item, direction)}
+         overshootLeft={false}
+         overshootRight={false}
+         leftThreshold={40}
+         rightThreshold={40}
+       >
+         <TouchableOpacity 
+           style={[styles.messageRow, isMe && styles.messageRowMe]}
+           onPress={handleDoubleTap}
+           onLongPress={() => setSelectedMessage(item)}
+           activeOpacity={0.9}
+         >
+           <View style={{ maxWidth: '80%' }}>
+             <View style={[
+               styles.messageBubble, 
+               isMe ? styles.bubbleMe : styles.bubbleOther,
+               { backgroundColor: isMe ? colors.accent : colors.bubbleOther }
+             ]}>
+               {/* Quoted message if replying */}
+               {repliedMessage && (
+                 <View style={[styles.quotedMessage, { backgroundColor: isMe ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.1)' }]}>
+                   <Text style={[styles.quotedText, { color: isMe ? 'rgba(255,255,255,0.8)' : colors.textMuted }]} numberOfLines={2}>
+                     {repliedMessage.text}
+                   </Text>
+                 </View>
+               )}
+               <Text style={[styles.messageText, { color: isMe ? colors.bubbleTextMe : colors.bubbleTextOther }]}>{item.text}</Text>
+             </View>
+             {/* Reactions display */}
+             {messageReactions.length > 0 && (
+               <View style={[styles.reactionsContainer, isMe && styles.reactionsContainerMe]}>
+                 {messageReactions.map((reaction, idx) => (
+                   <TouchableOpacity 
+                     key={idx} 
+                     onPress={() => {
+                       // Allow removing own reaction
+                       if (reaction.user_id === currentUserId) {
+                         addReaction(item.id, reaction.emoji);
+                       }
+                     }}
+                   >
+                     <Text style={[
+                       styles.reactionEmoji,
+                       reaction.user_id === currentUserId && styles.reactionEmojiMine
+                     ]}>
+                       {reaction.emoji}
+                     </Text>
+                   </TouchableOpacity>
+                 ))}
+               </View>
+             )}
+           </View>
+         </TouchableOpacity>
+       </Swipeable>
+      </View>
     );
   };
 
@@ -1288,6 +1486,9 @@ export default function ChatScreen() {
           </View>
           <View style={styles.headerInfo}>
             <Text style={[styles.headerName, { color: colors.text }]}>{otherUser?.display_name || 'User'}</Text>
+            <Text style={{ fontSize: 12, color: colors.textMuted, opacity: 0.7, fontFamily: 'Sebino-Regular' }}>
+                {otherUser?.username ? `@${otherUser.username}` : ''}
+            </Text>
 
           </View>
         </TouchableOpacity>
@@ -1309,7 +1510,7 @@ export default function ChatScreen() {
         )}
 
         <TouchableOpacity style={styles.menuButton} onPress={() => setShowMenu(true)}>
-          <Ionicons name="ellipsis-vertical" size={20} color={colors.text} />
+          <Image source={require('../../../assets/icons/more.png')} style={{ width: 24, height: 24, tintColor: colors.text }} resizeMode="contain" />
         </TouchableOpacity>
       </View>
 
@@ -1322,6 +1523,31 @@ export default function ChatScreen() {
         contentContainerStyle={styles.messagesList}
         showsVerticalScrollIndicator={false}
         inverted
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        ListFooterComponent={() => (
+          <View style={{ alignItems: 'center', paddingVertical: 40, paddingHorizontal: 20 }}>
+            <View style={{ width: 96, height: 96, borderRadius: 48, backgroundColor: colors.surfaceSecondary, marginBottom: 16, justifyContent: 'center', alignItems: 'center' }}>
+                {otherUser?.photo_url ? (
+                  <Image source={{ uri: otherUser.photo_url }} style={{ width: 96, height: 96, borderRadius: 48 }} />
+                ) : (
+                  <Text style={{ fontSize: 36, color: colors.text, fontFamily: 'Sebino-Regular' }}>{otherUser?.display_name?.[0]}</Text>
+                )}
+            </View>
+            <Text style={{ fontSize: 24, fontWeight: 'bold', color: colors.text, marginBottom: 4, fontFamily: 'Sebino-Regular', textAlign: 'center' }}>
+                {otherUser?.display_name}
+            </Text>
+            <Text style={{ fontSize: 16, color: colors.textMuted, marginBottom: 24, fontFamily: 'Sebino-Regular' }}>
+                @{otherUser?.username}
+            </Text>
+            <TouchableOpacity 
+              style={{ backgroundColor: colors.surfaceSecondary, paddingHorizontal: 24, paddingVertical: 10, borderRadius: 8 }}
+              onPress={() => router.push({ pathname: '/(app)/chat/details', params: { chatId } })}
+            >
+                <Text style={{ color: colors.text, fontWeight: '600', fontFamily: 'Sebino-Regular' }}>View Profile</Text>
+            </TouchableOpacity>
+          </View>
+        )}
         ListHeaderComponent={() => (
           otherUserTyping ? (
             <View style={[styles.messageRow, { marginTop: 8, marginBottom: 8 }]}>
@@ -1359,126 +1585,304 @@ export default function ChatScreen() {
         )}
       </Animated.View>
 
-      {/* Input Bar */}
-      {/* Input Bar */}
-      <Animated.View style={[styles.inputContainer, { marginBottom: keyboardHeight, backgroundColor: colors.headerBackground }]}>
-        {isRecording ? (
-           <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-             <TouchableOpacity onPress={async () => {
-                if(recording) {
-                   await recording.stopAndUnloadAsync();
-                   setRecording(null);
-                }
-                setIsRecording(false);
-                setRecordingDuration(0);
-             }}>
-                <Ionicons name="trash" size={24} color={COLORS.danger} />
-             </TouchableOpacity>
-             
-             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: COLORS.danger }} />
-                <Text style={{ color: colors.text, fontSize: 16 }}>
-                   {Math.floor(recordingDuration / 60)}:{(recordingDuration % 60).toString().padStart(2, '0')}
-                </Text>
-             </View>
-
-             <TouchableOpacity 
-               style={[styles.sendButton, { backgroundColor: colors.accent }]} 
-               onPress={stopRecording}
-             >
-                <Ionicons name="arrow-up" size={24} color="#ffffff" />
-             </TouchableOpacity>
-           </View>
-        ) : (
-          <>
-            <TouchableOpacity style={styles.inputIcon}>
-              <Ionicons name="happy-outline" size={24} color={colors.textMuted} />
-            </TouchableOpacity>
-
-            <TextInput
-              style={[styles.textInput, { backgroundColor: colors.inputBackground, color: colors.text }]}
-              placeholder="Type a message..."
-              placeholderTextColor={colors.textMuted}
-              value={inputText}
-              onChangeText={handleTextChange}
-              multiline
-            />
-
-            {selectedImageUri ? (
-               <TouchableOpacity 
-                 style={styles.inputIcon} 
-                 onPress={() => setSelectedImageUri(null)}
-                 disabled={isPickingImage}
-               >
-                 <Image 
-                   source={{ uri: selectedImageUri }} 
-                   style={{ width: 32, height: 32, borderRadius: 4, borderWidth: 1, borderColor: colors.accent }} 
-                 />
-                 <View style={{ 
-                   position: 'absolute', top: -5, right: -5, 
-                   backgroundColor: colors.background, borderRadius: 10 
-                 }}>
-                    <Ionicons name="close-circle" size={16} color={colors.textMuted} />
-                 </View>
-               </TouchableOpacity>
-            ) : (
-              <TouchableOpacity style={styles.inputIcon} onPress={pickImage} disabled={isPickingImage}>
-                {isPickingImage ? (
-                  <ActivityIndicator size="small" color={colors.textMuted} />
-                ) : (
-                  <Ionicons name="attach" size={24} color={colors.textMuted} />
-                )}
+      {/* Input Bar or Request Actions */}
+      {isChatDeleted ? (
+        <View style={[styles.inputContainer, { backgroundColor: colors.background, justifyContent: 'center', paddingBottom: 30 }]}>
+           <Text style={{ color: colors.textMuted, fontStyle: 'italic', textAlign: 'center', paddingHorizontal: 20 }}>
+             You lost them without a goodbye.
+           </Text>
+        </View>
+      ) : chatStatus === 'request' && chatCreatedBy && currentUserId && chatCreatedBy !== currentUserId ? (
+        <View style={[styles.inputContainer, { marginBottom: 20, backgroundColor: colors.headerBackground, flexDirection: 'column', height: 'auto', paddingVertical: 20 }]}>
+           <Text style={{ color: colors.text, marginBottom: 15, textAlign: 'center', fontWeight: '600' }}>
+              Message Request from {otherUser?.display_name || 'User'}
+           </Text>
+           <Text style={{ color: colors.textMuted, marginBottom: 20, textAlign: 'center', fontSize: 12 }}>
+              They won't know you've read their messages until you accept.
+           </Text>
+           <View style={{ flexDirection: 'row', gap: 20, width: '100%', justifyContent: 'center' }}>
+              <TouchableOpacity 
+                 onPress={rejectRequest}
+                 style={{ backgroundColor: 'transparent', borderWidth: 1, borderColor: colors.danger, paddingVertical: 10, paddingHorizontal: 30, borderRadius: 20 }}
+              >
+                 <Text style={{ color: colors.danger, fontWeight: 'bold' }}>Delete</Text>
               </TouchableOpacity>
-            )}
-
-            <TouchableOpacity 
-              style={[styles.sendButton, { backgroundColor: colors.accent }]} 
-              onPress={() => {
-                 if (selectedImageUri) {
-                   uploadAndSendImage(selectedImageUri);
-                 } else if (inputText.trim()) {
-                   sendMessage();
-                 } else {
-                   startRecording();
-                 }
-              }} 
-              disabled={sending}
-            >
-              {sending ? (
-                <ActivityIndicator size="small" color="#ffffff" />
-              ) : (
-                <Ionicons 
-                  name={(inputText.trim() || selectedImageUri) ? "send" : "mic"} 
-                  size={20} 
-                  color="#ffffff" 
-                />
-              )}
+              <TouchableOpacity 
+                 onPress={acceptRequest}
+                 style={{ backgroundColor: colors.accent, paddingVertical: 10, paddingHorizontal: 30, borderRadius: 20 }}
+              >
+                 <Text style={{ color: '#fff', fontWeight: 'bold' }}>Accept</Text>
+              </TouchableOpacity>
+           </View>
+        </View>
+      ) : (
+      <Animated.View style={[styles.inputContainer, { marginBottom: Animated.add(keyboardHeight, 20), backgroundColor: colors.headerBackground }]}>
+      <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', opacity: isRecording ? 0 : 1 }}>
+            <TouchableOpacity style={{ 
+              width: 40, height: 40, borderRadius: 20, 
+              backgroundColor: '#262626', 
+              justifyContent: 'center', alignItems: 'center',
+              marginRight: 8
+            }} onPress={() => setShowAddMenu(!showAddMenu)}>
+               <Animated.View style={{
+                 transform: [{
+                   rotate: menuAnim.interpolate({
+                     inputRange: [0, 1],
+                     outputRange: ['0deg', '45deg']
+                   })
+                 }]
+               }}>
+                 <Ionicons name="add" size={28} color="#A0A0A0" />
+               </Animated.View>
             </TouchableOpacity>
-          </>
-        )}
+
+            <View style={{ 
+              flex: 1, 
+              flexDirection: 'row', 
+              alignItems: 'center', 
+              backgroundColor: '#262626', 
+              borderRadius: 24, 
+              paddingLeft: 12,
+              paddingRight: 4,
+              paddingVertical: 0,
+              minHeight: 40
+            }}>
+              <TextInput
+                ref={inputRef}
+                style={[styles.textInput, { backgroundColor: 'transparent', color: colors.text, marginHorizontal: 0, flex: 1 }]}
+                placeholder="Message..."
+                placeholderTextColor={colors.textMuted}
+                value={inputText}
+                onChangeText={handleTextChange}
+                multiline
+              />
+
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Animated.View style={{
+                    height: 32,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'flex-end',
+                    width: inputMode.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [40, selectedImageUri ? 84 : 44]
+                    })
+                }}>
+                    {/* Actions Mode (Mic Only) */}
+                    <Animated.View style={{
+                        position: 'absolute', right: 0,
+                        flexDirection: 'row', gap: 12, alignItems: 'center',
+                        justifyContent: 'center', width: 40,
+                        opacity: inputMode.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }),
+                        transform: [{ scale: inputMode.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }) }]
+                    }} pointerEvents={inputText.trim().length > 0 || selectedImageUri ? 'none' : 'auto'}>
+                       <TouchableOpacity onPress={startRecording}>
+                         <Ionicons name="mic-outline" size={24} color={colors.text} />
+                       </TouchableOpacity>
+                    </Animated.View>
+
+                    {/* Send Mode */}
+                    <Animated.View style={{
+                        position: 'absolute', right: 0,
+                        flexDirection: 'row', gap: 8, alignItems: 'center',
+                        opacity: inputMode,
+                        transform: [{ scale: inputMode }]
+                    }} pointerEvents={inputText.trim().length > 0 || selectedImageUri ? 'auto' : 'none'}>
+                        {selectedImageUri && (
+                            <TouchableOpacity onPress={() => setSelectedImageUri(null)} activeOpacity={0.7}>
+                                <Image source={{ uri: selectedImageUri }} style={{ width: 32, height: 32, borderRadius: 6, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' }} />
+                                <View style={{ position: 'absolute', top: -5, right: -5, backgroundColor: colors.surface, borderRadius: 8 }}>
+                                    <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+                                </View>
+                            </TouchableOpacity>
+                        )}
+                       <TouchableOpacity 
+                         style={{ width: 44, height: 32, borderRadius: 16, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'center' }} 
+                         onPress={() => {
+                            if (selectedImageUri) uploadAndSendImage(selectedImageUri);
+                            else sendMessage();
+                         }}
+                       >
+                          <Image source={require('../../../assets/icons/paper-plane-send.png')} style={{ width: 20, height: 20, tintColor: '#000' }} />
+                       </TouchableOpacity>
+                    </Animated.View>
+                </Animated.View>
+              </View>
+            </View>
+      </View>
+
+      {/* Recording Overlay */}
+      {isRecording && (
+        <View style={{ 
+             position: 'absolute', 
+             top: 0, bottom: 0, left: 0, right: 0, 
+             backgroundColor: colors.headerBackground, 
+             flexDirection: 'row', 
+             alignItems: 'center', 
+             justifyContent: 'space-between',
+             paddingHorizontal: 16 // Match container padding
+        }}>
+              <TouchableOpacity onPress={async () => {
+                 if(recording) {
+                    await recording.stopAndUnloadAsync();
+                    setRecording(null);
+                 }
+                 setIsRecording(false);
+                 setRecordingDuration(0);
+              }}>
+                 <Ionicons name="trash" size={24} color={COLORS.danger} />
+              </TouchableOpacity>
+              
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                 <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: COLORS.danger }} />
+                 <Text style={{ color: colors.text, fontSize: 16 }}>
+                    {Math.floor(recordingDuration / 60)}:{(recordingDuration % 60).toString().padStart(2, '0')}
+                 </Text>
+              </View>
+
+              <TouchableOpacity 
+                style={{ width: 44, height: 32, borderRadius: 16, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'center' }} 
+                onPress={stopRecording}
+              >
+                 <Image source={require('../../../assets/icons/paper-plane-send.png')} style={{ width: 20, height: 20, tintColor: '#000' }} />
+              </TouchableOpacity>
+        </View>
+      )}
       </Animated.View>
+      )}
+
+      {/* Add Menu (Plus Button) - Inline to keep keyboard open */}
+      {isMenuMounted && (
+        <TouchableWithoutFeedback onPress={() => setShowAddMenu(false)}>
+          <View style={{ position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, zIndex: 10 }}>
+            <Animated.View style={{
+                position: 'absolute',
+                bottom: Animated.add(keyboardHeight, 80),
+                left: 16,
+                backgroundColor: '#262626',
+                borderRadius: 24,
+                paddingVertical: 16,
+                paddingHorizontal: 20,
+                minWidth: 240,
+                shadowColor: "#000",
+                shadowOffset: { width: 0, height: 4 },
+                shadowOpacity: 0.3,
+                shadowRadius: 8,
+                elevation: 5,
+                borderWidth: 1,
+                borderColor: 'rgba(255,255,255,0.08)',
+                gap: 24,
+                opacity: menuAnim,
+                transform: [
+                  { scale: menuAnim.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] }) },
+                  { translateY: menuAnim.interpolate({ inputRange: [0, 1], outputRange: [10, 0] }) }
+                ]
+            }}>
+              {/* Media */}
+              <TouchableOpacity 
+                style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}
+                onPress={() => {
+                  setShowAddMenu(false);
+                  pickImage();
+                }}
+              >
+                <Text style={{ fontSize: 16, color: '#fff', fontWeight: '600' }}>Media</Text>
+                <Ionicons name="image-outline" size={26} color="#fff" />
+              </TouchableOpacity>
+
+              {/* Stickers and GIFs */}
+              <TouchableOpacity 
+                style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}
+                onPress={() => setShowAddMenu(false)}
+              >
+                <Text style={{ fontSize: 16, color: '#fff', fontWeight: '600' }}>Stickers and GIFs</Text>
+                <Ionicons name="happy-outline" size={26} color="#fff" />
+              </TouchableOpacity>
+
+              {/* Camera */}
+              <TouchableOpacity 
+                style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}
+                onPress={() => setShowAddMenu(false)}
+              >
+                <Text style={{ fontSize: 16, color: '#fff', fontWeight: '600' }}>Camera</Text>
+                <Ionicons name="camera-outline" size={26} color="#fff" />
+              </TouchableOpacity>
+
+            </Animated.View>
+          </View>
+        </TouchableWithoutFeedback>
+      )}
 
       {/* Options Menu Modal */}
+      {/* Options Menu Modal (Bottom Sheet) */}
       <Modal
         visible={showMenu}
         transparent
-        animationType="fade"
+        animationType="slide"
         onRequestClose={() => setShowMenu(false)}
       >
         <TouchableWithoutFeedback onPress={() => setShowMenu(false)}>
-          <View style={styles.menuOverlay}>
-            <View style={[styles.menuDropdown, { backgroundColor: colors.surface }]}>
-              <TouchableOpacity 
-                style={styles.menuItem}
-                onPress={() => {
-                  setShowMenu(false);
-                  setShowClearConfirm(true);
-                }}
-              >
-                <Ionicons name="trash-outline" size={20} color={colors.danger} />
-                <Text style={[styles.menuItemText, { color: colors.danger }]}>Clear Chat</Text>
-              </TouchableOpacity>
-            </View>
+          <View style={[styles.menuOverlay, { justifyContent: 'flex-end', alignItems: 'center', padding: 0 }]}>
+            <TouchableWithoutFeedback> 
+                 {/* Inner Touchable to prevent closing on tap */}
+                <View style={{ 
+                    width: '100%', 
+                    backgroundColor: '#262626', 
+                    borderTopLeftRadius: 24, 
+                    borderTopRightRadius: 24, 
+                    paddingBottom: 40,
+                    paddingTop: 12,
+                    paddingHorizontal: 24
+                }}>
+                  {/* Handle */}
+                  <View style={{ 
+                      width: 40, height: 4, 
+                      backgroundColor: '#505050', 
+                      borderRadius: 2, 
+                      alignSelf: 'center', 
+                      marginBottom: 24 
+                  }} />
+
+                  {/* Options Group */}
+                  <View style={{ backgroundColor: '#333333', borderRadius: 16, overflow: 'hidden' }}>
+                      {/* Mute Option */}
+                      <TouchableOpacity 
+                        style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' }}
+                        onPress={() => {
+                          setShowMenu(false);
+                          showToast("Muted", "info");
+                        }}
+                      >
+                        <Text style={{ color: colors.text, fontSize: 17, fontWeight: '500', fontFamily: 'Sebino-Regular' }}>Mute</Text>
+                        <Ionicons name="notifications-off-outline" size={24} color={colors.text} />
+                      </TouchableOpacity>
+
+                      {/* Clear Chat Option */}
+                      <TouchableOpacity 
+                        style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' }}
+                        onPress={() => {
+                          setShowMenu(false);
+                          setShowClearConfirm(true);
+                        }}
+                      >
+                        <Text style={{ color: colors.danger, fontSize: 17, fontWeight: '500', fontFamily: 'Sebino-Regular' }}>Clear Chat</Text>
+                        <Ionicons name="trash-outline" size={24} color={colors.danger} />
+                      </TouchableOpacity>
+                      
+                      {/* Remove Friend Option */}
+                      <TouchableOpacity 
+                        style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16 }}
+                        onPress={() => {
+                          setShowMenu(false);
+                          setShowDeleteChatConfirm(true);
+                        }}
+                      >
+                        <Text style={{ color: colors.danger, fontSize: 17, fontWeight: '500', fontFamily: 'Sebino-Regular' }}>Block / Remove</Text>
+                        <Ionicons name="ban-outline" size={24} color={colors.danger} />
+                      </TouchableOpacity>
+                  </View>
+                </View>
+            </TouchableWithoutFeedback>
           </View>
         </TouchableWithoutFeedback>
       </Modal>
@@ -1633,6 +2037,206 @@ export default function ChatScreen() {
           </View>
         </TouchableWithoutFeedback>
       </Modal>
+      {/* Remove Friend Confirmation Modal */}
+      <Modal
+        visible={showDeleteChatConfirm}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowDeleteChatConfirm(false)}
+      >
+        <TouchableWithoutFeedback onPress={() => setShowDeleteChatConfirm(false)}>
+          <View style={styles.deleteModalOverlay}>
+            <View style={[styles.deleteModalContent, { backgroundColor: colors.surface }]}>
+              <View style={[styles.modalIcon, { backgroundColor: isDark ? 'rgba(239, 68, 68, 0.2)' : 'rgba(239, 68, 68, 0.1)' }]}>
+                <Ionicons name="person-remove-outline" size={40} color={colors.danger} />
+              </View>
+              <Text style={[styles.deleteModalTitle, { color: colors.text }]}>Remove Friend?</Text>
+              <Text style={{ color: colors.textMuted, marginBottom: 20, textAlign: 'center', fontFamily: 'Sebino-Regular' }}>
+                This will delete the chat and remove them from your list.
+              </Text>
+              <View style={styles.deleteModalButtons}>
+                <TouchableOpacity 
+                  style={[styles.deleteModalButton, { backgroundColor: 'transparent' }]}
+                  onPress={() => setShowDeleteChatConfirm(false)}
+                  disabled={isDeletingChat}
+                >
+                  <Text style={{ color: colors.textMuted, fontSize: 16, fontFamily: 'Sebino-Regular' }}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={[styles.deleteModalButton, { backgroundColor: colors.danger, borderRadius: 20 }]}
+                  onPress={deleteChat}
+                  disabled={isDeletingChat}
+                >
+                  {isDeletingChat ? (
+                    <ActivityIndicator size="small" color="#ffffff" />
+                  ) : (
+                    <Text style={{ color: '#ffffff', fontSize: 16, fontWeight: '600', fontFamily: 'Sebino-Regular' }}>Remove</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+
+      {/* Message Options Menu */}
+      <Modal
+        visible={!!selectedMessage && !showInfoModal && !messageToDelete}
+        transparent
+        animationType="fade"
+        onRequestClose={() => { setSelectedMessage(null); setTimeout(() => inputRef.current?.focus(), 100); }}
+      >
+        <TouchableWithoutFeedback onPress={() => { setSelectedMessage(null); setTimeout(() => inputRef.current?.focus(), 100); }}>
+          <View style={[styles.deleteModalOverlay, { backgroundColor: 'rgba(0,0,0,0.6)' }]}>
+            <View style={{ alignItems: 'center' }}>
+              
+              {/* Reaction Bar */}
+              <View style={{ 
+                flexDirection: 'row', 
+                backgroundColor: '#262626', 
+                borderRadius: 40, 
+                paddingVertical: 8, 
+                paddingHorizontal: 16, 
+                gap: 16,
+                marginBottom: 16,
+                shadowColor: "#000",
+                shadowOffset: { width: 0, height: 4 },
+                shadowOpacity: 0.3,
+                shadowRadius: 8,
+                elevation: 5,
+              }}>
+                {REACTION_EMOJIS.slice(0, 5).map((emoji, idx) => (
+                  <TouchableOpacity
+                    key={idx}
+                    onPress={() => {
+                      if (selectedMessage) addReaction(selectedMessage.id, emoji);
+                      setSelectedMessage(null);
+                      setTimeout(() => inputRef.current?.focus(), 100);
+                    }}
+                  >
+                    <Text style={{ fontSize: 28 }}>{emoji}</Text>
+                  </TouchableOpacity>
+                ))}
+                {/* Placeholder for 'More Reactions' + button if needed */}
+                <TouchableOpacity style={{ justifyContent: 'center', alignItems: 'center', width: 30 }}>
+                   <Ionicons name="add" size={24} color={colors.textMuted} />
+                </TouchableOpacity>
+              </View>
+
+              {/* Menu Actions */}
+              <View style={{ 
+                width: 240, 
+                backgroundColor: '#262626', 
+                borderRadius: 16, 
+                overflow: 'hidden',
+                shadowColor: "#000",
+                shadowOffset: { width: 0, height: 4 },
+                shadowOpacity: 0.3,
+                shadowRadius: 8,
+                elevation: 5,
+              }}>
+                {/* Reply */}
+                <TouchableOpacity 
+                   style={styles.menuItem} 
+                   onPress={() => {
+                     if (selectedMessage) {
+                       setReplyToMessage(selectedMessage);
+                       setSelectedMessage(null);
+                       setTimeout(() => inputRef.current?.focus(), 100);
+                     }
+                   }}
+                >
+                   <Text style={[styles.menuItemText, { color: colors.text, flex: 1 }]}>Reply</Text>
+                   <Ionicons name="arrow-undo-outline" size={22} color={colors.text} />
+                </TouchableOpacity>
+
+                {/* Copy */}
+                {selectedMessage?.type === 'text' && (
+                  <TouchableOpacity 
+                    style={[styles.menuItem, { borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.05)' }]} 
+                    onPress={async () => {
+                        await ExpoClipboard.setStringAsync(selectedMessage.text || "");
+                        showToast("Copied to clipboard", "success");
+                        setSelectedMessage(null);
+                        setTimeout(() => inputRef.current?.focus(), 100);
+                    }}
+                  >
+                      <Text style={[styles.menuItemText, { color: colors.text, flex: 1 }]}>Copy</Text>
+                      <Ionicons name="copy-outline" size={22} color={colors.text} />
+                  </TouchableOpacity>
+                )}
+
+                {/* Info */}
+                <TouchableOpacity 
+                  style={[styles.menuItem, { borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.05)' }]} 
+                  onPress={() => setShowInfoModal(true)}
+                >
+                    <Text style={[styles.menuItemText, { color: colors.text, flex: 1 }]}>Info</Text>
+                    <Ionicons name="information-circle-outline" size={22} color={colors.text} />
+                </TouchableOpacity>
+
+                {/* Delete / Unsend */}
+                <TouchableOpacity 
+                  style={[styles.menuItem, { borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.05)' }]} 
+                  onPress={() => {
+                      setMessageToDelete(selectedMessage);
+                      setSelectedMessage(null);
+                  }}
+                >
+                    <Text style={[styles.menuItemText, { color: colors.danger, flex: 1 }]}>
+                      {selectedMessage?.user_id === currentUserId ? 'Unsend' : 'Delete'}
+                    </Text>
+                    <Ionicons name="trash-outline" size={22} color={colors.danger} />
+                </TouchableOpacity>
+
+              </View>
+            </View>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+
+      {/* Message Info Modal */}
+      <Modal
+        visible={showInfoModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => { setShowInfoModal(false); setSelectedMessage(null); }}
+      >
+        <TouchableWithoutFeedback onPress={() => { setShowInfoModal(false); setSelectedMessage(null); }}>
+          <View style={styles.deleteModalOverlay}>
+             <View style={[styles.deleteModalContent, { backgroundColor: colors.surface }]}>
+                <Text style={[styles.modalTitle, { color: colors.text, marginBottom: 20 }]}>Message Info</Text>
+                
+                <View style={{ width: '100%', gap: 16 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Text style={{ color: colors.textMuted, fontSize: 16, fontFamily: 'Sebino-Regular' }}>Sent</Text>
+                        <Text style={{ color: colors.text, fontSize: 16, fontFamily: 'Sebino-Regular' }}>
+                            {selectedMessage ? dayjs(selectedMessage.created_at).format('h:mm A') : ''}
+                        </Text>
+                    </View>
+                    
+                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Text style={{ color: colors.textMuted, fontSize: 16, fontFamily: 'Sebino-Regular' }}>Read</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                             <Text style={{ color: colors.text, fontSize: 16, fontFamily: 'Sebino-Regular' }}>
+                                {selectedMessage?.is_read ? 'Yes' : 'No'}
+                             </Text>
+                             <Ionicons name="checkmark-done" size={18} color={selectedMessage?.is_read ? '#4ade80' : colors.textMuted} />
+                        </View>
+                    </View>
+                </View>
+
+                 <TouchableOpacity 
+                  style={[styles.deleteModalButton, { backgroundColor: colors.accent, marginTop: 24, width: '100%' }]}
+                  onPress={() => { setShowInfoModal(false); setSelectedMessage(null); }}
+                >
+                  <Text style={{ color: '#ffffff', fontSize: 16, fontWeight: '600', fontFamily: 'Sebino-Regular' }}>Close</Text>
+                </TouchableOpacity>
+             </View>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+
     </View>
     </GestureHandlerRootView>
   );
@@ -1660,9 +2264,9 @@ const styles = StyleSheet.create({
     marginLeft: 8,
   },
   headerAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: COLORS.ironGrey,
     justifyContent: 'center',
     alignItems: 'center',
@@ -1670,21 +2274,22 @@ const styles = StyleSheet.create({
   },
   headerAvatarText: {
     color: COLORS.brightSnow,
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
+    fontFamily: 'Sebino-Regular',
   },
   headerAvatarImage: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
   },
   onlineIndicator: {
     position: 'absolute',
     bottom: 0,
     right: 0,
-    width: 12,
-    height: 12,
-    borderRadius: 6,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
     backgroundColor: COLORS.online,
     borderWidth: 2,
     borderColor: COLORS.carbonBlack,
@@ -1693,17 +2298,20 @@ const styles = StyleSheet.create({
     marginLeft: 10,
   },
   headerName: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
     color: COLORS.brightSnow,
+    fontFamily: 'Sebino-Regular',
   },
   headerStatus: {
     fontSize: 12,
     color: COLORS.online,
+    fontFamily: 'Sebino-Regular',
   },
   typingStatus: {
     color: COLORS.accent,
     fontStyle: 'italic',
+    fontFamily: 'Sebino-Regular',
   },
   menuButton: {
     padding: 8,
@@ -1721,23 +2329,23 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   messageBubble: {
+    maxWidth: '100%',
+    paddingVertical: 6,
     paddingHorizontal: 12,
-    paddingTop: 5,
-    paddingBottom: 5,
-    borderRadius: 10,
+    borderRadius: 20,
+    marginVertical: 1, // Tighter message spacing
   },
   bubbleOther: {
-    backgroundColor: COLORS.gunmetal,
-    borderBottomLeftRadius: 0,
+    backgroundColor: '#4c4c4c',
   },
   bubbleMe: {
     backgroundColor: COLORS.ironGrey,
-    borderBottomRightRadius: 0,
   },
   messageText: {
     fontSize: 15,
     color: COLORS.brightSnow,
     lineHeight: 20,
+    fontFamily: 'Sebino-Regular',
   },
   messageTimeContainer: {
     flexDirection: 'row',
@@ -1748,16 +2356,16 @@ const styles = StyleSheet.create({
     fontSize: 9,
     color: COLORS.paleSlate2,
     marginBottom: -4,
+    fontFamily: 'Sebino-Regular',
   },
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingTop: 8,
-    paddingBottom: 20,
-    backgroundColor: COLORS.carbonBlack,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.gunmetal,
+    paddingHorizontal: 16,
+    paddingTop: 2,
+    paddingBottom: 2,
+    backgroundColor: 'transparent',
+    borderTopWidth: 0,
   },
   inputIcon: {
     padding: 8,
@@ -1766,12 +2374,13 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.gunmetal,
     borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 0,
     color: COLORS.brightSnow,
     fontSize: 16,
     maxHeight: 100,
     marginHorizontal: 4,
+    fontFamily: 'Sebino-Regular',
   },
   sendButton: {
     width: 40,
@@ -1789,29 +2398,32 @@ const styles = StyleSheet.create({
   },
   menuDropdown: {
     position: 'absolute',
-    top: 70,
-    right: 16,
+    top: 65,
+    right: 20,
     backgroundColor: COLORS.gunmetal,
-    borderRadius: 12,
+    borderRadius: 24,
     paddingVertical: 8,
-    minWidth: 160,
+    minWidth: 200,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    elevation: 5,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 10,
   },
   menuItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    gap: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    gap: 14,
   },
   menuItemText: {
     fontSize: 16,
     color: COLORS.brightSnow,
-    fontWeight: '500',
+    fontWeight: '600',
+    fontFamily: 'Sebino-Regular',
   },
 
   // Modal Styles
@@ -1844,6 +2456,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.brightSnow,
     marginBottom: 8,
+    fontFamily: 'Sebino-Regular',
   },
   modalMessage: {
     fontSize: 14,
@@ -1851,6 +2464,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
     marginBottom: 20,
+    fontFamily: 'Sebino-Regular',
   },
   modalButtons: {
     flexDirection: 'row',
@@ -1873,11 +2487,13 @@ const styles = StyleSheet.create({
     color: COLORS.brightSnow,
     fontSize: 16,
     fontWeight: '600',
+    fontFamily: 'Sebino-Regular',
   },
   modalButtonConfirmText: {
     color: COLORS.brightSnow,
     fontSize: 16,
     fontWeight: '600',
+    fontFamily: 'Sebino-Regular',
   },
 
   // Reply styles
@@ -1891,6 +2507,7 @@ const styles = StyleSheet.create({
   quotedText: {
     fontSize: 13,
     fontStyle: 'italic',
+    fontFamily: 'Sebino-Regular',
   },
   replyPreview: {
     flexDirection: 'row',
@@ -1914,10 +2531,12 @@ const styles = StyleSheet.create({
   replyPreviewLabel: {
     fontSize: 13,
     fontWeight: '600',
+    fontFamily: 'Sebino-Regular',
   },
   replyPreviewMessage: {
     fontSize: 13,
     marginTop: 2,
+    fontFamily: 'Sebino-Regular',
   },
   replyPreviewClose: {
     padding: 8,
@@ -1927,6 +2546,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     width: 50,
     marginLeft: 8,
+  },
+  swipeReplyActionRight: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    width: 50,
+    marginRight: 8,
   },
 
   // Reaction styles
@@ -1972,31 +2597,48 @@ const styles = StyleSheet.create({
     textShadowRadius: 4,
   },
 
-  // Delete modal styles (compact)
+  // Delete modal styles (Modern & Simple)
   deleteModalOverlay: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.6)', 
+    padding: 20,
   },
   deleteModalContent: {
-    borderRadius: 16,
-    paddingVertical: 16,
-    paddingHorizontal: 20,
+    borderRadius: 24,
+    padding: 24,
+    width: '100%',
+    maxWidth: 320,
     alignItems: 'center',
-    minWidth: 220,
+    shadowColor: "#000",
+    shadowOffset: {
+      width: 0,
+      height: 10,
+    },
+    shadowOpacity: 0.3,
+    shadowRadius: 20,
+    elevation: 10,
   },
   deleteModalTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 16,
+    fontSize: 20,
+    fontWeight: '700',
+    marginBottom: 12,
+    marginTop: 10,
+    textAlign: 'center',
+    fontFamily: 'Sebino-Regular',
   },
   deleteModalButtons: {
     flexDirection: 'row',
     gap: 12,
+    width: '100%',
+    marginTop: 10,
   },
   deleteModalButton: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

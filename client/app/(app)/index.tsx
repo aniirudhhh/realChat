@@ -47,10 +47,13 @@ interface ChatWithDetails {
     text: string;
     created_at: string;
   };
+  status?: 'active' | 'request' | 'blocked';
+  created_by?: string | null;
 }
 
 export default function ChatListScreen() {
   const [chats, setChats] = useState<ChatWithDetails[]>([]);
+  const [messageRequests, setMessageRequests] = useState<ChatWithDetails[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<User[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -66,6 +69,7 @@ export default function ChatListScreen() {
   const { colors, isDark } = useTheme();
   const insets = useSafeAreaInsets();
   const typingChannelsRef = useRef<any[]>([]);
+  const [activeTab, setActiveTab] = useState<'inbox' | 'requests'>('inbox');
 
   useEffect(() => {
     loadCurrentUser();
@@ -214,7 +218,7 @@ export default function ChatListScreen() {
           .select('chat_id')
           .eq('user_id', user.id);
           
-        participantData = fallbackData;
+        participantData = fallbackData?.map(d => ({ ...d, last_read_at: null })) || null;
         participantError = fallbackError;
       }
 
@@ -290,9 +294,39 @@ export default function ChatListScreen() {
       });
 
       const chatsWithDetails = await Promise.all(chatPromises);
-      // Show all valid chats (even if cleared/no messages)
       const validChats = chatsWithDetails.filter(c => c.id);
-      setChats(validChats);
+      
+      const activeChats: ChatWithDetails[] = [];
+      const requests: ChatWithDetails[] = [];
+
+      validChats.forEach(chat => {
+         // If request AND I am not the creator -> It's a received request
+         if (chat.status === 'request' && chat.created_by !== user.id) {
+            // Only show requests if they have a message
+            if (chat.last_message) {
+               requests.push(chat);
+            }
+         } else if (chat.status !== 'blocked') {
+            // Active chats OR My sent requests
+            // Only show if there is at least one message
+            if (chat.last_message) {
+               activeChats.push(chat);
+            }
+         }
+      });
+
+      // Sort by latest message
+      const sortByDate = (a: ChatWithDetails, b: ChatWithDetails) => {
+          const dateA = a.last_message?.created_at ? new Date(a.last_message.created_at).getTime() : 0;
+          const dateB = b.last_message?.created_at ? new Date(b.last_message.created_at).getTime() : 0;
+          return dateB - dateA;
+      };
+
+      activeChats.sort(sortByDate);
+      requests.sort(sortByDate);
+
+      setChats(activeChats);
+      setMessageRequests(requests);
     } catch (error) {
       console.error('Error loading chats:', error);
     } finally {
@@ -511,24 +545,22 @@ export default function ChatListScreen() {
     );
   }
 
+
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       <StatusBar barStyle={isDark ? "light-content" : "dark-content"} />
       
       {/* Header */}
-      <View style={[styles.header, { backgroundColor: colors.headerBackground, paddingTop: insets.top + 10 }]}>
-        <TouchableOpacity style={[styles.profileAvatar, { backgroundColor: colors.surfaceSecondary }]} onPress={() => router.push('/(app)/profile')}>
-          {currentUser?.photo_url ? (
-            <Image source={{ uri: currentUser.photo_url }} style={styles.profileAvatarImage} />
-          ) : (
-            <Text style={[styles.profileAvatarText, { color: colors.text }]}>
-              {currentUser?.display_name?.[0] || 'U'}
-            </Text>
-          )}
-        </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: colors.text }]}>Messages</Text>
-        <TouchableOpacity style={styles.menuButton}>
-          <Text style={[styles.menuDots, { color: colors.text }]}>⋮</Text>
+      <View style={[styles.header, { backgroundColor: colors.headerBackground, paddingTop: insets.top + 10, paddingBottom: 10 }]}>
+        <Text style={[styles.headerTitle, { color: colors.text, fontSize: 32, fontFamily: 'Sebino-Regular' }]}>Messages</Text>
+        <TouchableOpacity 
+          style={styles.menuButton}
+          onPress={() => router.push('/(app)/new-chat')}
+        >
+          <Image 
+            source={require('../../assets/icons/icons8-add-friend-96.png')} 
+            style={{ width: 30, height: 30, tintColor: colors.text }} 
+          />
         </TouchableOpacity>
       </View>
 
@@ -537,17 +569,61 @@ export default function ChatListScreen() {
         <Ionicons name="search" size={20} color={colors.textMuted} style={styles.searchIcon} />
         <TextInput
           style={[styles.searchInput, { color: colors.text }]}
-          placeholder="Search by name or username..."
+          placeholder="Search..."
           placeholderTextColor={colors.textMuted}
           value={searchQuery}
           onChangeText={setSearchQuery}
         />
-        {searchQuery.length > 0 && (
-          <TouchableOpacity onPress={() => setSearchQuery('')}>
-            <Ionicons name="close-circle" size={18} color={colors.textMuted} />
-          </TouchableOpacity>
-        )}
       </View>
+
+      {/* Tabs */}
+      {searchQuery.length === 0 && (
+         <View style={{ flexDirection: 'row', paddingHorizontal: 16, marginBottom: 16, gap: 10 }}>
+            <TouchableOpacity 
+               onPress={() => setActiveTab('inbox')}
+               style={{ 
+                  backgroundColor: activeTab === 'inbox' ? colors.surfaceSecondary : 'transparent',
+                  paddingVertical: 6,
+                  paddingHorizontal: 14,
+                  borderRadius: 20,
+                  borderWidth: 1,
+                  borderColor: colors.border
+               }}
+            >
+               <Text style={{ 
+                  color: activeTab === 'inbox' ? colors.text : colors.textMuted,
+                  fontWeight: activeTab === 'inbox' ? '600' : '400',
+                  fontSize: 14
+               }}>Inbox</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+               onPress={() => setActiveTab('requests')}
+               style={{ 
+                  backgroundColor: activeTab === 'requests' ? colors.surfaceSecondary : 'transparent',
+                  paddingVertical: 6,
+                  paddingHorizontal: 14,
+                  borderRadius: 20,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 6,
+                  borderWidth: 1,
+                  borderColor: colors.border
+               }}
+            >
+               <Text style={{ 
+                  color: activeTab === 'requests' ? colors.text : colors.textMuted,
+                  fontWeight: activeTab === 'requests' ? '600' : '400',
+                  fontSize: 14
+               }}>Requests</Text>
+               {messageRequests.length > 0 && (
+                  <View style={{ backgroundColor: colors.danger, borderRadius: 10, minWidth: 18, height: 18, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 4 }}>
+                     <Text style={{ color: '#fff', fontSize: 10, fontWeight: 'bold' }}>{messageRequests.length}</Text>
+                  </View>
+               )}
+            </TouchableOpacity>
+         </View>
+      )}
 
       {/* List */}
       {searchQuery.length > 0 ? (
@@ -565,13 +641,17 @@ export default function ChatListScreen() {
         />
       ) : (
         <FlatList
-          data={chats}
+          data={activeTab === 'inbox' ? chats : messageRequests}
           renderItem={renderChatItem}
           keyExtractor={item => item.id}
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
-              <Text style={[styles.emptyText, { color: colors.text }]}>No messages yet</Text>
-              <Text style={[styles.emptySubtext, { color: colors.textMuted }]}>Start a conversation!</Text>
+              <Text style={[styles.emptyText, { color: colors.text }]}>
+                 {activeTab === 'inbox' ? 'No messages' : 'No requests'}
+              </Text>
+              <Text style={[styles.emptySubtext, { color: colors.textMuted }]}>
+                 {activeTab === 'inbox' ? 'Start a conversation!' : 'Message requests will appear here'}
+              </Text>
             </View>
           }
           showsVerticalScrollIndicator={false}
@@ -585,14 +665,6 @@ export default function ChatListScreen() {
           }
         />
       )}
-      
-      {/* FAB */}
-      <TouchableOpacity 
-        style={[styles.fab, { backgroundColor: colors.accent }]} 
-        onPress={() => router.push('/(app)/new-chat')}
-      >
-        <Ionicons name="add" size={28} color="#ffffff" />
-      </TouchableOpacity>
 
       {/* Delete Chat Confirmation Modal */}
       <Modal
@@ -668,6 +740,7 @@ const styles = StyleSheet.create({
     color: COLORS.brightSnow,
     fontSize: 16,
     fontWeight: '600',
+    fontFamily: 'Sebino-Regular',
   },
   profileAvatarImage: {
     width: 36,
@@ -678,6 +751,7 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: 'bold',
     color: COLORS.brightSnow,
+    fontFamily: 'Sebino-Regular',
   },
   menuButton: {
     width: 36,
@@ -706,6 +780,7 @@ const styles = StyleSheet.create({
     flex: 1,
     color: COLORS.brightSnow,
     fontSize: 16,
+    fontFamily: 'Sebino-Regular',
   },
   chatItem: {
     flexDirection: 'row',
@@ -734,6 +809,7 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: COLORS.brightSnow,
+    fontFamily: 'Sebino-Regular',
   },
   onlineIndicator: {
     position: 'absolute',
@@ -758,18 +834,22 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: COLORS.brightSnow,
+    fontFamily: 'Sebino-Regular',
   },
   usernameText: {
     fontSize: 14,
     color: COLORS.slateGrey,
+    fontFamily: 'Sebino-Regular',
   },
   time: {
     fontSize: 12,
     color: COLORS.slateGrey,
+    fontFamily: 'Sebino-Regular',
   },
   lastMessage: {
     fontSize: 14,
     color: COLORS.slateGrey,
+    fontFamily: 'Sebino-Regular',
   },
   typingIndicator: {
     color: '#3b82f6',
@@ -785,28 +865,13 @@ const styles = StyleSheet.create({
     fontSize: 18,
     color: COLORS.brightSnow,
     marginBottom: 8,
+    fontFamily: 'Sebino-Regular',
   },
   emptySubtext: {
     fontSize: 14,
     color: COLORS.slateGrey,
+    fontFamily: 'Sebino-Regular',
   },
-  fab: {
-    position: 'absolute',
-    right: 20,
-    bottom: 30,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: COLORS.accent,
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 5,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-  },
-
   // Modal Styles
   modalOverlay: {
     flex: 1,
@@ -837,6 +902,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.brightSnow,
     marginBottom: 8,
+    fontFamily: 'Sebino-Regular',
   },
   modalMessage: {
     fontSize: 14,
@@ -844,6 +910,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
     marginBottom: 20,
+    fontFamily: 'Sebino-Regular',
   },
   
   // Unread Badge
@@ -867,6 +934,7 @@ const styles = StyleSheet.create({
     color: '#000000',
     fontSize: 10,
     fontWeight: '700',
+    fontFamily: 'Sebino-Regular',
   },
 
   modalButtons: {
@@ -890,5 +958,6 @@ const styles = StyleSheet.create({
     color: COLORS.brightSnow,
     fontSize: 16,
     fontWeight: '600',
+    fontFamily: 'Sebino-Regular',
   },
 });
