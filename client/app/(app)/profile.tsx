@@ -44,15 +44,12 @@ export default function ProfileScreen() {
   const [user, setUser] = useState<User | null>(null);
   const [image, setImage] = useState<string | null>(null);
   const [notifications, setNotifications] = useState(true);
-  const [lastSeen, setLastSeen] = useState(false);
-  
-  // Delete account modal states
-  const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [deleteConfirmText, setDeleteConfirmText] = useState('');
-  const [isDeleting, setIsDeleting] = useState(false);
-  
+  const [friendsCount, setFriendsCount] = useState(0);
+
   // Logout modal states
   const [showLogoutModal, setShowLogoutModal] = useState(false);
+  
+
   
   useEffect(() => {
     loadUser();
@@ -69,6 +66,27 @@ export default function ProfileScreen() {
       if (data) {
         setUser(data);
         setImage(data.photo_url);
+        
+        // Count Friends (Unique people I have chatted with)
+        // 1. Get my chat IDs
+        const { data: myChats } = await supabase
+           .from('chat_participants')
+           .select('chat_id')
+           .eq('user_id', authUser.id);
+           
+        if (myChats && myChats.length > 0) {
+            const chatIds = myChats.map(c => c.chat_id);
+            // 2. Get unique participants in those chats (excluding me)
+            const { count } = await supabase
+               .from('chat_participants')
+               .select('user_id', { count: 'exact', head: true })
+               .in('chat_id', chatIds)
+               .neq('user_id', authUser.id);
+            
+            setFriendsCount(count || 0);
+        } else {
+            setFriendsCount(0);
+        }
       }
     }
   };
@@ -192,76 +210,7 @@ export default function ProfileScreen() {
     setShowLogoutModal(false);
   };
 
-  const handleDeleteAccount = async () => {
-    if (deleteConfirmText !== 'DELETE') {
-      showToast('Please type DELETE to confirm', 'warning');
-      return;
-    }
 
-    setIsDeleting(true);
-    try {
-      const { data: { user: authUser } } = await supabase.auth.getUser();
-      if (!authUser) {
-        showToast('No user session found', 'error');
-        return;
-      }
-
-      console.log('Deleting account for user:', authUser.id);
-
-      // Step 1: Get all chats this user is part of
-      const { data: userChats } = await supabase
-        .from('chat_participants')
-        .select('chat_id')
-        .eq('user_id', authUser.id);
-
-      const chatIds = userChats?.map(c => c.chat_id) || [];
-      console.log('User is in chats:', chatIds);
-
-      // Step 2: Delete all messages in those chats
-      if (chatIds.length > 0) {
-        await supabase.from('messages').delete().in('chat_id', chatIds);
-        console.log('Deleted messages in user chats');
-      }
-
-      // Step 3: Delete all chat_participants for those chats (both users)
-      if (chatIds.length > 0) {
-        await supabase.from('chat_participants').delete().in('chat_id', chatIds);
-        console.log('Deleted chat participants');
-      }
-
-      // Step 4: Delete the chats themselves
-      if (chatIds.length > 0) {
-        await supabase.from('chats').delete().in('id', chatIds);
-        console.log('Deleted chats');
-      }
-      
-      // Step 5: Delete user from users table
-      const { error: userDeleteError } = await supabase
-        .from('users')
-        .delete()
-        .eq('id', authUser.id);
-
-      if (userDeleteError) {
-        console.error('Error deleting user data:', userDeleteError);
-        showToast('Failed to delete account data', 'error');
-        return;
-      }
-
-      console.log('User data deleted successfully');
-
-      // Sign out the user (this will trigger navigation to login)
-      await supabase.auth.signOut();
-      
-      showToast('Account deleted successfully', 'success');
-      setShowDeleteModal(false);
-      
-    } catch (error: any) {
-      console.error('Delete account error:', error);
-      showToast(error.message || 'Failed to delete account', 'error');
-    } finally {
-      setIsDeleting(false);
-    }
-  };
 
   const getInitials = (name: string | null) => {
     if (!name) return 'U';
@@ -281,9 +230,7 @@ export default function ProfileScreen() {
           <Ionicons name="arrow-back" size={24} color={colors.text} />
         </TouchableOpacity>
         <Text style={[styles.headerTitle, { color: colors.text }]}>Profile</Text>
-        <TouchableOpacity>
-          <Ionicons name="ellipsis-horizontal" size={24} color={colors.text} />
-        </TouchableOpacity>
+        <View style={{ width: 24 }} />
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
@@ -306,7 +253,7 @@ export default function ProfileScreen() {
             <Text style={[styles.userName, { color: colors.text }]}>{userName}</Text>
             <Text style={[styles.userEmail, { color: colors.textMuted }]}>{userPhone}</Text>
             {user?.username && (
-              <Text style={[styles.userStatus, { color: colors.accent }]}>@{user.username}</Text>
+              <Text style={[styles.userStatus, { color: colors.accent }]}>{user.username}</Text>
             )}
           </View>
         </View>
@@ -315,68 +262,58 @@ export default function ProfileScreen() {
         <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>Theme</Text>
         <View style={[styles.themeContainer, { backgroundColor: colors.surface }]}>
           <TouchableOpacity 
-            style={[styles.themeOption, theme === 'light' && styles.themeOptionActive, theme === 'light' && { backgroundColor: colors.accent + '20' }]}
+            style={[styles.themeOption, theme === 'light' && styles.themeOptionActive, theme === 'light' && { backgroundColor: colors.accent }]}
             onPress={() => setTheme('light')}
           >
-            <Ionicons name="sunny-outline" size={24} color={theme === 'light' ? colors.accent : colors.textMuted} />
-            <Text style={[styles.themeText, { color: theme === 'light' ? colors.accent : colors.textMuted }]}>Light</Text>
+            <Ionicons name="sunny-outline" size={20} color={theme === 'light' ? '#ffffff' : colors.textMuted} />
+            <Text style={[styles.themeText, { color: theme === 'light' ? '#ffffff' : colors.textMuted }]}>Light</Text>
           </TouchableOpacity>
           
           <TouchableOpacity 
-            style={[styles.themeOption, theme === 'dark' && styles.themeOptionActive, theme === 'dark' && { backgroundColor: colors.accent + '20' }]}
+            style={[styles.themeOption, theme === 'dark' && styles.themeOptionActive, theme === 'dark' && { backgroundColor: colors.accent }]}
             onPress={() => setTheme('dark')}
           >
-            <Ionicons name="moon-outline" size={24} color={theme === 'dark' ? colors.accent : colors.textMuted} />
-            <Text style={[styles.themeText, { color: theme === 'dark' ? colors.accent : colors.textMuted }]}>Dark</Text>
-          </TouchableOpacity>
-          
-          <TouchableOpacity 
-            style={[styles.themeOption, theme === 'system' && styles.themeOptionActive, theme === 'system' && { backgroundColor: colors.accent + '20' }]}
-            onPress={() => setTheme('system')}
-          >
-            <Ionicons name="phone-portrait-outline" size={24} color={theme === 'system' ? colors.accent : colors.textMuted} />
-            <Text style={[styles.themeText, { color: theme === 'system' ? colors.accent : colors.textMuted }]}>System</Text>
+            <Ionicons name="moon-outline" size={20} color={theme === 'dark' ? '#ffffff' : colors.textMuted} />
+            <Text style={[styles.themeText, { color: theme === 'dark' ? '#ffffff' : colors.textMuted }]}>Dark</Text>
           </TouchableOpacity>
         </View>
 
         {/* Settings Section */}
         <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>Settings</Text>
         <View style={[styles.settingsCard, { backgroundColor: colors.surface }]}>
-          <View style={[styles.settingRow, { borderBottomColor: colors.border }]}>
+          <TouchableOpacity 
+            style={styles.settingRow}
+            onPress={() => router.push('/(app)/friends-list')}
+          >
             <View style={styles.settingLeft}>
-              <Ionicons name="notifications-outline" size={22} color={colors.text} />
-              <Text style={[styles.settingText, { color: colors.text }]}>Notifications</Text>
+              <Ionicons name="people-outline" size={22} color={colors.text} />
+              <Text style={[styles.settingText, { color: colors.text }]}>See Your Friends</Text>
             </View>
-            <Switch
-              value={notifications}
-              onValueChange={setNotifications}
-              trackColor={{ false: colors.surfaceSecondary, true: colors.accent }}
-              thumbColor="#ffffff"
-              ios_backgroundColor={colors.surfaceSecondary}
-            />
-          </View>
+            <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+          </TouchableOpacity>
           
           <View style={[styles.divider, { backgroundColor: colors.border }]} />
           
-          <View style={[styles.settingRow, { borderBottomColor: colors.border }]}>
-            <View style={styles.settingLeft}>
-              <Ionicons name="eye-off-outline" size={22} color={colors.text} />
-              <Text style={[styles.settingText, { color: colors.text }]}>Last seen</Text>
-            </View>
-            <Switch
-              value={lastSeen}
-              onValueChange={setLastSeen}
-              trackColor={{ false: colors.surfaceSecondary, true: colors.accent }}
-              thumbColor="#ffffff"
-            />
-          </View>
-          
-          <View style={[styles.divider, { backgroundColor: colors.border }]} />
-          
-          <TouchableOpacity style={styles.settingRow}>
+          <TouchableOpacity 
+             style={styles.settingRow} 
+             onPress={() => router.push('/(app)/account-security')}
+          >
             <View style={styles.settingLeft}>
               <Ionicons name="lock-closed-outline" size={22} color={colors.text} />
               <Text style={[styles.settingText, { color: colors.text }]}>Account & Security</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
+          </TouchableOpacity>
+          
+          <View style={[styles.divider, { backgroundColor: colors.border }]} />
+
+           <TouchableOpacity 
+             style={styles.settingRow} 
+             onPress={() => router.push('/(app)/terms-privacy')}
+          >
+            <View style={styles.settingLeft}>
+              <Ionicons name="document-text-outline" size={22} color={colors.text} />
+              <Text style={[styles.settingText, { color: colors.text }]}>Terms & Privacy</Text>
             </View>
             <Ionicons name="chevron-forward" size={20} color={colors.textMuted} />
           </TouchableOpacity>
@@ -385,7 +322,7 @@ export default function ProfileScreen() {
         {/* More Section */}
         <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>More</Text>
         <View style={[styles.settingsCard, { backgroundColor: colors.surface }]}>
-          <TouchableOpacity style={styles.settingRow}>
+          <TouchableOpacity style={styles.settingRow} onPress={() => router.push('/(app)/help-support')}>
             <View style={styles.settingLeft}>
               <Ionicons name="help-circle-outline" size={22} color={colors.text} />
               <Text style={[styles.settingText, { color: colors.text }]}>Help & Support</Text>
@@ -402,18 +339,6 @@ export default function ProfileScreen() {
             </View>
           </TouchableOpacity>
         </View>
-
-        {/* Danger Zone */}
-        <Text style={[styles.sectionTitle, { color: COLORS.danger }]}>Danger Zone</Text>
-        <View style={[styles.settingsCard, { borderColor: COLORS.danger, borderWidth: 1 }]}>
-          <TouchableOpacity style={styles.settingRow} onPress={() => setShowDeleteModal(true)}>
-            <View style={styles.settingLeft}>
-              <Ionicons name="trash-outline" size={22} color={COLORS.danger} />
-              <Text style={[styles.settingText, styles.logoutText]}>Delete Account</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={COLORS.danger} />
-          </TouchableOpacity>
-        </View>
         
         <View style={styles.bottomSpace} />
       </ScrollView>
@@ -426,78 +351,26 @@ export default function ProfileScreen() {
         onRequestClose={() => setShowLogoutModal(false)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalIcon}>
-              <Ionicons name="log-out-outline" size={40} color={COLORS.accent} />
+          <View style={[styles.modalContent, { backgroundColor: colors.surface }]}>
+            <View style={[styles.modalIcon, { backgroundColor: 'rgba(59, 130, 246, 0.1)' }]}>
+              <Ionicons name="log-out-outline" size={40} color={colors.accent} />
             </View>
-            <Text style={styles.modalTitle}>Log Out</Text>
-            <Text style={styles.modalMessage}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>Log Out</Text>
+            <Text style={[styles.modalMessage, { color: colors.textMuted }]}>
               Are you sure you want to log out of your account?
             </Text>
             <View style={styles.modalButtons}>
               <TouchableOpacity 
-                style={[styles.modalButton, styles.modalButtonCancel]}
+                style={[styles.modalButton, styles.modalButtonCancel, { backgroundColor: colors.surfaceSecondary }]}
                 onPress={() => setShowLogoutModal(false)}
               >
-                <Text style={styles.modalButtonCancelText}>Cancel</Text>
+                <Text style={[styles.modalButtonCancelText, { color: colors.text }]}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity 
-                style={[styles.modalButton, styles.modalButtonConfirm]}
+                style={[styles.modalButton, styles.modalButtonConfirm, { backgroundColor: colors.accent }]}
                 onPress={handleLogout}
               >
-                <Text style={styles.modalButtonConfirmText}>Log Out</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Delete Account Confirmation Modal */}
-      <Modal
-        visible={showDeleteModal}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowDeleteModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={[styles.modalIcon, { backgroundColor: 'rgba(239, 68, 68, 0.1)' }]}>
-              <Ionicons name="warning" size={40} color={COLORS.danger} />
-            </View>
-            <Text style={styles.modalTitle}>Delete Account</Text>
-            <Text style={styles.modalMessage}>
-              This action is permanent and cannot be undone. All your data, messages, and chats will be deleted forever.
-            </Text>
-            <Text style={styles.confirmLabel}>Type DELETE to confirm:</Text>
-            <TextInput
-              style={styles.confirmInput}
-              value={deleteConfirmText}
-              onChangeText={setDeleteConfirmText}
-              placeholder="DELETE"
-              placeholderTextColor={COLORS.slateGrey}
-              autoCapitalize="characters"
-            />
-            <View style={styles.modalButtons}>
-              <TouchableOpacity 
-                style={[styles.modalButton, styles.modalButtonCancel]}
-                onPress={() => {
-                  setShowDeleteModal(false);
-                  setDeleteConfirmText('');
-                }}
-                disabled={isDeleting}
-              >
-                <Text style={styles.modalButtonCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity 
-                style={[styles.modalButton, styles.modalButtonDanger]}
-                onPress={handleDeleteAccount}
-                disabled={isDeleting || deleteConfirmText !== 'DELETE'}
-              >
-                {isDeleting ? (
-                  <ActivityIndicator size="small" color={COLORS.brightSnow} />
-                ) : (
-                  <Text style={styles.modalButtonConfirmText}>Delete</Text>
-                )}
+                <Text style={[styles.modalButtonConfirmText, { color: '#ffffff' }]}>Log Out</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -605,14 +478,17 @@ const styles = StyleSheet.create({
   themeContainer: {
     flexDirection: 'row',
     backgroundColor: COLORS.gunmetal,
-    borderRadius: 12,
+    borderRadius: 25,
     padding: 4,
   },
   themeOption: {
     flex: 1,
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    borderRadius: 10,
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 20,
   },
   themeOptionActive: {
     backgroundColor: COLORS.ironGrey,

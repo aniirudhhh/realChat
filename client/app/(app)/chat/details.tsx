@@ -69,7 +69,7 @@ export default function ChatDetailsScreen() {
         .single();
         
       if (chatData) {
-        setAutoDeletePref(chatData.auto_delete_preference || 'off');
+        setAutoDeletePref(chatData.auto_delete_preference || '7d');
         setIsGroup(chatData.is_group);
         if (chatData.is_group) {
              setGroupInfo({ 
@@ -113,7 +113,7 @@ export default function ChatDetailsScreen() {
     }
   };
 
-  const updateAutoDelete = async (value: 'off' | 'close' | '24h' | '7d') => {
+  const updateAutoDelete = async (value: 'close' | '24h' | '7d') => {
     const previous = autoDeletePref;
     setAutoDeletePref(value);
     try {
@@ -132,7 +132,7 @@ export default function ChatDetailsScreen() {
         await supabase.from('messages').insert({
           chat_id: chatId,
           user_id: user.id,
-          text: `changed disappearing messages to ${value === 'close' ? 'Close' : value === 'off' ? 'Off' : value}`,
+          text: `changed disappearing messages to ${value === 'close' ? 'After Closing' : value === '24h' ? '24 Hours' : '7 Days'}`,
           type: 'system',
           is_read: false
         });
@@ -325,7 +325,7 @@ export default function ChatDetailsScreen() {
 
   const isAdmin = isGroup && currentUserId && groupInfo.admin_ids?.includes(currentUserId);
 
-  const Option = ({ label, value, icon }: { label: string, value: 'off' | 'close' | '24h' | '7d', icon: string }) => (
+  const Option = ({ label, value, icon }: { label: string, value: 'close' | '24h' | '7d', icon: string }) => (
     <TouchableOpacity 
       style={[styles.option, { borderBottomColor: colors.border }]} 
       onPress={() => updateAutoDelete(value)}
@@ -438,15 +438,16 @@ export default function ChatDetailsScreen() {
         <View style={styles.section}>
             <Text style={[styles.sectionHeader, { color: colors.textMuted }]}>DISAPPEARING MESSAGES</Text>
             <View style={[styles.optionsContainer, { backgroundColor: colors.surface }]}>
-            <Option label="Off" value="off" icon="infinite-outline" />
             <Option label="After Closing Chat" value="close" icon="eye-off-outline" />
             <Option label="24 Hours" value="24h" icon="time-outline" />
-            <Option label="7 Days" value="7d" icon="calendar-outline" />
+            <Option label="Default (7 Days)" value="7d" icon="calendar-outline" />
             </View>
             <Text style={[styles.helperText, { color: colors.textMuted }]}>
             {autoDeletePref === 'close' 
                 ? "Messages here clear when you close the chat."
-                : "Messages clear automatically after the selected time."}
+                : autoDeletePref === '24h'
+                ? "Messages automatically delete after 24 hours."
+                : "Messages automatically delete after 7 days."}
             </Text>
         </View>
 

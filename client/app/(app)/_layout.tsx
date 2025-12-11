@@ -151,6 +151,30 @@ export default function AppLayout() {
         }} 
       />
       <Stack.Screen name="settings" options={{ title: 'Settings' }} />
+      <Stack.Screen 
+        name="account-security" 
+        options={{ 
+          headerShown: false,
+        }} 
+      />
+      <Stack.Screen 
+        name="terms-privacy" 
+        options={{ 
+          headerShown: false,
+        }} 
+      />
+      <Stack.Screen 
+        name="help-support" 
+        options={{ 
+          headerShown: false,
+        }} 
+      />
+      <Stack.Screen 
+        name="friends-list" 
+        options={{ 
+          headerShown: false,
+        }} 
+      />
     </Stack>
   );
 }

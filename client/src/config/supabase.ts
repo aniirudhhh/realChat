@@ -35,7 +35,7 @@ export interface Chat {
   id: string;
   created_at: string;
   updated_at: string;
-  auto_delete_preference?: 'off' | 'close' | '24h' | '7d';
+  auto_delete_preference?: 'close' | '24h' | '7d';
   status: 'active' | 'request' | 'blocked';
   created_by: string | null;
   name?: string | null;
@@ -51,7 +51,7 @@ export interface Message {
   text: string | null;
   image_url: string | null;
   audio_url?: string | null;
-  type?: 'text' | 'image' | 'system' | 'audio';
+  type?: 'text' | 'image' | 'system' | 'audio' | 'gif';
   is_read: boolean;
   reply_to_id: string | null;
   created_at: string;

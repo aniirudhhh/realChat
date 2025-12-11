@@ -305,18 +305,29 @@ export default function ChatListScreen() {
       const requests: ChatWithDetails[] = [];
 
       validChats.forEach(chat => {
-         // If request AND I am not the creator -> It's a received request
-         if (chat.status === 'request' && chat.created_by !== user.id) {
-            // Only show requests if they have a message
-            if (chat.last_message) {
-               requests.push(chat);
+         // BLOCKED: Hide entirely
+         if (chat.status === 'blocked') {
+            return; // Skip
+         }
+         
+         // REQUEST status: Requires special handling
+         if (chat.status === 'request') {
+            // I received this request (someone else created it)
+            if (chat.created_by && chat.created_by !== user.id) {
+               // Only show in Requests tab if they've sent a message
+               if (chat.last_message) {
+                  requests.push(chat);
+               }
             }
-         } else if (chat.status !== 'blocked') {
-            // Active chats OR My sent requests
-            // Only show if there is at least one message
-            if (chat.last_message) {
-               activeChats.push(chat);
-            }
+            // I sent this request (I created it)
+            // Don't show in main list - sender sees it only while in the chat
+            // This prevents showing unanswered requests in the feed
+            return;
+         }
+         
+         // ACTIVE chats: Show in main list if there's a message
+         if (chat.last_message) {
+            activeChats.push(chat);
          }
       });
 

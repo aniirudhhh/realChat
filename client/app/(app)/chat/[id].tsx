@@ -29,6 +29,7 @@ import { useTheme } from '../../../src/context/ThemeContext';
 import { useChatSounds } from '../../../src/hooks/useChatSounds';
 import { api } from '../../../src/services/api';
 import TypingIndicator from '../../../src/components/TypingIndicator';
+import GifPicker from '../../../src/components/GifPicker';
 import dayjs from 'dayjs';
 import calendar from 'dayjs/plugin/calendar';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -112,6 +113,7 @@ export default function ChatScreen() {
   const [isPickingImage, setIsPickingImage] = useState(false);
   const [selectedImageUri, setSelectedImageUri] = useState<string | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
+  const [showGifPicker, setShowGifPicker] = useState(false);
 
   // Chat Request State
   const [chatStatus, setChatStatus] = useState<'active' | 'request' | 'blocked' | null>(null);
@@ -596,7 +598,7 @@ export default function ChatScreen() {
         .single();
       
       if (chatData) {
-        setAutoDeletePref(chatData.auto_delete_preference || 'off');
+        setAutoDeletePref(chatData.auto_delete_preference || '7d');
         const status = chatData.status || 'active';
         setChatStatus(status);
         chatStatusRef.current = status;
@@ -1108,6 +1110,41 @@ export default function ChatScreen() {
     }
   };
 
+  const sendGif = async (gifUrl: string) => {
+    if (!currentUserId) return;
+
+    setSending(true);
+    try {
+      const { error } = await supabase
+        .from('messages')
+        .insert({
+          chat_id: chatId,
+          user_id: currentUserId,
+          text: 'GIF',
+          type: 'gif',
+          image_url: gifUrl, // Reusing image_url for GIF URL
+        });
+
+      if (error) {
+        console.error('Error sending GIF:', error);
+        showToast('Failed to send GIF', 'error');
+      } else {
+        playSendSound();
+        
+        // Update chat's updated_at
+        await supabase
+          .from('chats')
+          .update({ updated_at: new Date().toISOString() })
+          .eq('id', chatId);
+      }
+    } catch (error) {
+      console.error('Error sending GIF:', error);
+      showToast('Failed to send GIF', 'error');
+    } finally {
+      setSending(false);
+    }
+  };
+
   const clearChat = async () => {
     setIsClearing(true);
     try {
@@ -1238,19 +1275,73 @@ export default function ChatScreen() {
     }
   };
 
+  const leaveGroup = async () => {
+    if (!currentUserId) return;
+    try {
+      setShowMenu(false);
+      // Remove current user from chat_participants
+      const { error } = await supabase
+        .from('chat_participants')
+        .delete()
+        .eq('chat_id', chatId)
+        .eq('user_id', currentUserId);
+
+      if (error) {
+        console.error('Error leaving group:', error);
+        showToast('Failed to leave group', 'error');
+      } else {
+        showToast('Left the group', 'success');
+        router.replace('/(app)');
+      }
+    } catch (e) {
+      console.error('Error leaving group:', e);
+      showToast('Failed to leave group', 'error');
+    }
+  };
+
   const swipeableRefs = useRef<Map<string, Swipeable>>(new Map());
 
-  const renderSwipeAction = () => (
-    <View style={styles.swipeReplyAction}>
-      <Ionicons name="arrow-undo" size={20} color={COLORS.slateGrey} />
-    </View>
-  );
+  const renderSwipeAction = (progress: Animated.AnimatedInterpolation<number>, dragX: Animated.AnimatedInterpolation<number>) => {
+    const translateX = dragX.interpolate({
+      inputRange: [0, 60],
+      outputRange: [-30, 0],
+      extrapolate: 'clamp'
+    });
+    const scale = dragX.interpolate({
+      inputRange: [0, 60],
+      outputRange: [0.5, 1],
+      extrapolate: 'clamp'
+    });
+    return (
+      <Animated.View style={[
+        styles.swipeReplyAction,
+        { transform: [{ translateX }, { scale }] }
+      ]}>
+        <Ionicons name="arrow-undo" size={22} color={colors.textMuted} />
+      </Animated.View>
+    );
+  };
 
-  const renderRightSwipeAction = () => (
-    <View style={styles.swipeReplyActionRight}>
-      <Ionicons name="arrow-undo" size={20} color={COLORS.slateGrey} />
-    </View>
-  );
+  const renderRightSwipeAction = (progress: Animated.AnimatedInterpolation<number>, dragX: Animated.AnimatedInterpolation<number>) => {
+    const translateX = dragX.interpolate({
+      inputRange: [-60, 0],
+      outputRange: [0, 30],
+      extrapolate: 'clamp'
+    });
+    const scale = dragX.interpolate({
+      inputRange: [-60, 0],
+      outputRange: [1, 0.5],
+      extrapolate: 'clamp'
+    });
+    return (
+      <Animated.View style={[
+        styles.swipeReplyActionRight,
+        { transform: [{ translateX }, { scale }] }
+      ]}>
+        <Ionicons name="arrow-undo" size={22} color={colors.textMuted} />
+      </Animated.View>
+    );
+  };
 
   const handleSwipeOpen = (item: MessageWithUser, direction: string) => {
     setReplyToMessage(item);
@@ -1268,6 +1359,10 @@ export default function ChatScreen() {
     // Inverted List: Messages[index+1] is OLDER (visually above)
     const previousMessageDate = !isLastMessage ? dayjs(messages[index + 1].created_at) : null;
     const showDayHeader = !previousMessageDate || !currentMessageDate.isSame(previousMessageDate, 'day');
+
+    // Sender name logic for groups: only show if previous message (visually above) is from different user
+    const previousMessage = !isLastMessage ? messages[index + 1] : null;
+    const showSenderName = !previousMessage || previousMessage.user_id !== item.user_id || showDayHeader;
 
     const DayHeader = () => (
       <View style={{ alignItems: 'center', marginVertical: 16 }}>
@@ -1416,6 +1511,63 @@ export default function ChatScreen() {
        );
     }
 
+    // GIF Message Rendering
+    if (item.type === 'gif' && item.image_url) {
+       return (
+        <View>
+         {showDayHeader && <DayHeader />}
+         <Swipeable
+           ref={ref => {
+             if (ref) swipeableRefs.current.set(item.id, ref);
+           }}
+            renderLeftActions={!isMe ? renderSwipeAction : undefined}
+            renderRightActions={isMe ? renderRightSwipeAction : undefined}
+            onSwipeableWillOpen={(direction) => handleSwipeOpen(item, direction)}
+           friction={2}
+           rightThreshold={40}
+         >
+            <TouchableOpacity 
+              onLongPress={() => setSelectedMessage(item)}
+              activeOpacity={0.8}
+              style={[
+                styles.messageRow, 
+                isMe ? styles.messageRowMe : {}
+              ]}
+           >
+            <View style={[
+              styles.messageBubble,
+              isMe ? styles.bubbleMe : styles.bubbleOther,
+              { padding: 4, overflow: 'hidden' }
+            ]}>
+              <Image 
+                source={{ uri: item.image_url }} 
+                style={{ 
+                  width: 200, 
+                  height: 150, 
+                  borderRadius: 12,
+                }} 
+                resizeMode="cover"
+              />
+              <Text style={{ 
+                position: 'absolute', 
+                bottom: 8, 
+                right: 8, 
+                fontSize: 10, 
+                color: 'rgba(255,255,255,0.8)',
+                backgroundColor: 'rgba(0,0,0,0.4)',
+                paddingHorizontal: 6,
+                paddingVertical: 2,
+                borderRadius: 4
+              }}>
+                {formatTime(item.created_at)}
+              </Text>
+            </View>
+           </TouchableOpacity>
+         </Swipeable>
+        </View>
+       );
+    }
+
     const handleDoubleTap = () => {
       const now = Date.now();
       const lastTap = lastTapTimes.current.get(item.id) || 0;
@@ -1437,8 +1589,9 @@ export default function ChatScreen() {
          onSwipeableOpen={(direction) => handleSwipeOpen(item, direction)}
          overshootLeft={false}
          overshootRight={false}
-         leftThreshold={40}
-         rightThreshold={40}
+         leftThreshold={30}
+         rightThreshold={30}
+         friction={1.5}
        >
          <TouchableOpacity 
            style={[styles.messageRow, isMe && styles.messageRowMe, { marginBottom: 0 }]}
@@ -1447,7 +1600,7 @@ export default function ChatScreen() {
            activeOpacity={0.9}
          >
            <View style={{ maxWidth: '80%' }}>
-            {isGroup && !isMe && (
+            {isGroup && !isMe && showSenderName && (
                 <Text style={{ fontSize: 10, color: colors.accent, marginBottom: 4, marginLeft: 2, fontWeight: 'bold' }}>
                     {participants.get(item.user_id)?.display_name || 'User'}
                 </Text>
@@ -1459,11 +1612,25 @@ export default function ChatScreen() {
             ]}>
               {/* Quoted message if replying */}
               {repliedMessage && (
-                <View style={[styles.quotedMessage, { backgroundColor: isMe ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.1)' }]}>
-                  <Text style={[styles.quotedText, { color: isMe ? 'rgba(255,255,255,0.8)' : colors.textMuted }]} numberOfLines={2}>
-                    {repliedMessage.text}
+                <TouchableOpacity 
+                  style={[styles.quotedMessage, { 
+                    backgroundColor: isMe ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.08)',
+                    borderLeftColor: isMe ? 'rgba(255,255,255,0.6)' : colors.accent 
+                  }]}
+                  activeOpacity={0.7}
+                >
+                  <Text style={{ 
+                    fontSize: 11, 
+                    fontWeight: '600', 
+                    color: isMe ? 'rgba(255,255,255,0.9)' : colors.accent,
+                    marginBottom: 2 
+                  }}>
+                    {repliedMessage.user_id === currentUserId ? 'You' : (participants.get(repliedMessage.user_id)?.display_name || otherUser?.display_name || 'User')}
                   </Text>
-                </View>
+                  <Text style={[styles.quotedText, { color: isMe ? 'rgba(255,255,255,0.7)' : colors.textMuted }]} numberOfLines={1}>
+                    {repliedMessage.type === 'image' ? '📷 Photo' : repliedMessage.type === 'audio' ? '🎤 Voice Message' : repliedMessage.type === 'gif' ? 'GIF' : repliedMessage.text}
+                  </Text>
+                </TouchableOpacity>
               )}
               <Text style={[styles.messageText, { color: isMe ? colors.bubbleTextMe : colors.bubbleTextOther }]}>{item.text}</Text>
             </View>
@@ -1553,19 +1720,16 @@ export default function ChatScreen() {
             </Text>
             {!isGroup && (
                 <Text style={{ fontSize: 12, color: colors.textMuted, opacity: 0.7, fontFamily: 'Sebino-Regular' }}>
-                    {otherUser?.username ? `@${otherUser.username}` : ''}
+                    {otherUser?.username || ''}
                 </Text>
             )}
           </View>
         </TouchableOpacity>
 
-        {autoDeletePref !== 'off' && (
+        {(autoDeletePref === 'close' || autoDeletePref === '24h') && (
           <View style={{ marginRight: 10, flexDirection: 'row', alignItems: 'center' }}>
              <Ionicons 
-               name={
-                 autoDeletePref === 'close' ? 'eye-off-outline' :
-                 autoDeletePref === '24h' ? 'timer-outline' : 'calendar-outline'
-               } 
+               name={autoDeletePref === 'close' ? 'eye-off-outline' : 'timer-outline'} 
                size={20} 
                color={colors.textMuted} 
              />
@@ -1623,6 +1787,9 @@ export default function ChatScreen() {
             >
                 <Text style={{ color: colors.text, fontWeight: '600', fontFamily: 'Sebino-Regular', fontSize: 13 }}>View Profile</Text>
             </TouchableOpacity>
+            <Text style={{ color: colors.textMuted, fontSize: 11, marginTop: 16, textAlign: 'center', fontFamily: 'Sebino-Regular' }}>
+              🔒 Messages will auto-delete after 7 days
+            </Text>
           </View>
           )
         )}
@@ -1701,7 +1868,7 @@ export default function ChatScreen() {
       <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', opacity: isRecording ? 0 : 1 }}>
             <TouchableOpacity style={{ 
               width: 40, height: 40, borderRadius: 20, 
-              backgroundColor: '#262626', 
+              backgroundColor: colors.surfaceSecondary, 
               justifyContent: 'center', alignItems: 'center',
               marginRight: 8
             }} onPress={() => setShowAddMenu(!showAddMenu)}>
@@ -1721,7 +1888,7 @@ export default function ChatScreen() {
               flex: 1, 
               flexDirection: 'row', 
               alignItems: 'center', 
-              backgroundColor: '#262626', 
+              backgroundColor: colors.surfaceSecondary, 
               borderRadius: 24, 
               paddingLeft: 12,
               paddingRight: 4,
@@ -1874,9 +2041,12 @@ export default function ChatScreen() {
               {/* Stickers and GIFs */}
               <TouchableOpacity 
                 style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}
-                onPress={() => setShowAddMenu(false)}
+                onPress={() => {
+                  setShowAddMenu(false);
+                  setShowGifPicker(true);
+                }}
               >
-                <Text style={{ fontSize: 16, color: '#fff', fontWeight: '600' }}>Stickers and GIFs</Text>
+                <Text style={{ fontSize: 16, color: '#fff', fontWeight: '600' }}>GIFs</Text>
                 <Ionicons name="happy-outline" size={26} color="#fff" />
               </TouchableOpacity>
 
@@ -1908,7 +2078,7 @@ export default function ChatScreen() {
                  {/* Inner Touchable to prevent closing on tap */}
                 <View style={{ 
                     width: '100%', 
-                    backgroundColor: '#262626', 
+                    backgroundColor: colors.surface, 
                     borderTopLeftRadius: 24, 
                     borderTopRightRadius: 24, 
                     paddingBottom: 40,
@@ -1918,17 +2088,18 @@ export default function ChatScreen() {
                   {/* Handle */}
                   <View style={{ 
                       width: 40, height: 4, 
-                      backgroundColor: '#505050', 
+                      backgroundColor: colors.textMuted, 
                       borderRadius: 2, 
                       alignSelf: 'center', 
-                      marginBottom: 24 
+                      marginBottom: 24,
+                      opacity: 0.4
                   }} />
 
                   {/* Options Group */}
-                  <View style={{ backgroundColor: '#333333', borderRadius: 16, overflow: 'hidden' }}>
+                  <View style={{ backgroundColor: colors.surfaceSecondary, borderRadius: 16, overflow: 'hidden' }}>
                       {/* Mute Option */}
                       <TouchableOpacity 
-                        style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' }}
+                        style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
                         onPress={() => {
                           setShowMenu(false);
                           showToast("Muted", "info");
@@ -1940,7 +2111,7 @@ export default function ChatScreen() {
 
                       {/* Clear Chat Option */}
                       <TouchableOpacity 
-                        style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' }}
+                        style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
                         onPress={() => {
                           setShowMenu(false);
                           setShowClearConfirm(true);
@@ -1950,17 +2121,27 @@ export default function ChatScreen() {
                         <Ionicons name="trash-outline" size={24} color={colors.danger} />
                       </TouchableOpacity>
                       
-                      {/* Remove Friend Option */}
-                      <TouchableOpacity 
-                        style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16 }}
-                        onPress={() => {
-                          setShowMenu(false);
-                          setShowDeleteChatConfirm(true);
-                        }}
-                      >
-                        <Text style={{ color: colors.danger, fontSize: 17, fontWeight: '500', fontFamily: 'Sebino-Regular' }}>Block / Remove</Text>
-                        <Ionicons name="ban-outline" size={24} color={colors.danger} />
-                      </TouchableOpacity>
+                      {/* Leave Group / Block Remove Option - conditional */}
+                      {isGroup ? (
+                        <TouchableOpacity 
+                          style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16 }}
+                          onPress={leaveGroup}
+                        >
+                          <Text style={{ color: colors.danger, fontSize: 17, fontWeight: '500', fontFamily: 'Sebino-Regular' }}>Leave Group</Text>
+                          <Ionicons name="exit-outline" size={24} color={colors.danger} />
+                        </TouchableOpacity>
+                      ) : (
+                        <TouchableOpacity 
+                          style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 16 }}
+                          onPress={() => {
+                            setShowMenu(false);
+                            setShowDeleteChatConfirm(true);
+                          }}
+                        >
+                          <Text style={{ color: colors.danger, fontSize: 17, fontWeight: '500', fontFamily: 'Sebino-Regular' }}>Block / Remove</Text>
+                          <Ionicons name="ban-outline" size={24} color={colors.danger} />
+                        </TouchableOpacity>
+                      )}
                   </View>
                 </View>
             </TouchableWithoutFeedback>
@@ -2320,6 +2501,13 @@ export default function ChatScreen() {
 
         </View>
       </KeyboardAvoidingView>
+
+      {/* GIF Picker */}
+      <GifPicker
+        visible={showGifPicker}
+        onClose={() => setShowGifPicker(false)}
+        onSelectGif={sendGif}
+      />
     </GestureHandlerRootView>
   );
 }
@@ -2381,7 +2569,7 @@ const styles = StyleSheet.create({
   },
   headerName: {
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: '700',
     color: COLORS.brightSnow,
     fontFamily: 'Sebino-Regular',
   },
@@ -2579,15 +2767,14 @@ const styles = StyleSheet.create({
 
   // Reply styles
   quotedMessage: {
-    padding: 8,
-    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
     marginBottom: 6,
     borderLeftWidth: 3,
-    borderLeftColor: '#3b82f6',
   },
   quotedText: {
-    fontSize: 13,
-    fontStyle: 'italic',
+    fontSize: 12,
     fontFamily: 'Sebino-Regular',
   },
   replyPreview: {
@@ -2624,15 +2811,15 @@ const styles = StyleSheet.create({
   },
   swipeReplyAction: {
     justifyContent: 'center',
-    alignItems: 'center',
+    alignItems: 'flex-end',
     width: 50,
-    marginLeft: 8,
+    paddingRight: 8,
   },
   swipeReplyActionRight: {
     justifyContent: 'center',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     width: 50,
-    marginRight: 8,
+    paddingLeft: 8,
   },
 
   // Reaction styles

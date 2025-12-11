@@ -163,6 +163,9 @@ export default function NewChatScreen() {
         { chat_id: newChat.id, user_id: selectedUser.id },
       ]);
 
+      // Note: Don't add system message here - chat starts as request
+      // Auto-delete message will be shown in chat UI footer instead
+
       router.replace(`/(app)/chat/${newChat.id}`);
     } catch (e) {
       console.error('Error 1:1:', e);
@@ -231,6 +234,15 @@ export default function NewChatScreen() {
        ];
        
        await supabase.from('chat_participants').insert(participants);
+
+       // Add auto-delete info message
+       await supabase.from('messages').insert({
+         chat_id: newChat.id,
+         user_id: currentUserId,
+         text: 'Messages in this chat will auto-delete after 7 days',
+         type: 'system',
+         is_read: false
+       });
        
        setShowGroupModal(false);
        router.replace(`/(app)/chat/${newChat.id}`);
@@ -264,6 +276,29 @@ export default function NewChatScreen() {
         </View>
       </View>
 
+      {/* Selected Users Chips */}
+      {selectedUsers.length > 0 && (
+        <View style={styles.chipsContainer}>
+          {selectedUsers.map(user => (
+            <TouchableOpacity 
+              key={user.id}
+              style={[styles.chip, { backgroundColor: colors.accent }]}
+              onPress={() => toggleSelection(user)}
+            >
+              {user.photo_url ? (
+                <Image source={{ uri: user.photo_url }} style={styles.chipAvatar} />
+              ) : (
+                <View style={[styles.chipAvatar, { backgroundColor: 'rgba(255,255,255,0.2)', justifyContent: 'center', alignItems: 'center' }]}>
+                  <Text style={{ color: '#fff', fontSize: 10, fontWeight: 'bold' }}>{user.display_name?.[0] || '?'}</Text>
+                </View>
+              )}
+              <Text style={styles.chipText}>{user.display_name || user.username}</Text>
+              <Ionicons name="close" size={14} color="#fff" />
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+
       {/* Search Input */}
       <View style={[styles.searchContainer, { backgroundColor: colors.inputBackground }]}>
         <Ionicons name="search" size={20} color={colors.textMuted} />
@@ -277,6 +312,11 @@ export default function NewChatScreen() {
           onSubmitEditing={performSearch}
           returnKeyType="search"
         />
+        {searchQuery.length > 0 && (
+          <TouchableOpacity onPress={() => setSearchQuery('')}>
+            <Ionicons name="close-circle" size={20} color={colors.textMuted} />
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* Results */}
@@ -432,15 +472,43 @@ const styles = StyleSheet.create({
   searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    margin: 16,
+    marginHorizontal: 16,
+    marginBottom: 16,
     paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 15
+    paddingVertical: 12,
+    borderRadius: 15,
+    gap: 8
   },
   input: {
     flex: 1,
-    marginLeft: 10,
     fontSize: 16,
+    paddingVertical: 0,
+  },
+  chipsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    paddingHorizontal: 16,
+    marginBottom: 8,
+    gap: 8
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 4,
+    paddingLeft: 4,
+    paddingRight: 10,
+    borderRadius: 20,
+    gap: 6
+  },
+  chipAvatar: {
+    width: 24,
+    height: 24,
+    borderRadius: 12
+  },
+  chipText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '500'
   },
   
   userItem: {
