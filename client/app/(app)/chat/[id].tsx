@@ -40,6 +40,7 @@ import * as FileSystem from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
 import * as ExpoClipboard from 'expo-clipboard';
 
+
 const COLORS = {
   brightSnow: '#f8f9fa',
   platinum: '#e9ecef',
@@ -77,6 +78,9 @@ export default function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [otherUser, setOtherUser] = useState<User | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [isGroup, setIsGroup] = useState(false);
+  const [groupInfo, setGroupInfo] = useState<{name?: string, photo_url?: string}>({});
+  const [participants, setParticipants] = useState<Map<string, User>>(new Map());
   const [showMenu, setShowMenu] = useState(false);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [isMenuMounted, setIsMenuMounted] = useState(false);
@@ -124,14 +128,9 @@ export default function ChatScreen() {
   // Animation for Add Menu (0 = closed, 1 = open)
   const menuAnim = useRef(new Animated.Value(0)).current;
 
-  // Enable LayoutAnimation on Android
-  useEffect(() => {
-    if (Platform.OS === 'android') {
-      if (UIManager.setLayoutAnimationEnabledExperimental) {
-        UIManager.setLayoutAnimationEnabledExperimental(true);
-      }
-    }
-  }, []);
+  // Manual Keyboard Handling (Reanimated) removed
+  // Reverted to standard behavior
+
 
   // Animate input mode when text/image changes
   useEffect(() => {
@@ -220,7 +219,9 @@ export default function ChatScreen() {
   useEffect(() => {
     loadCurrentUser();
     loadChatDetails();
-    loadMessages();
+    loadCurrentUser();
+    loadChatDetails();
+    // loadMessages(); // Moved to useEffect depending on currentUserId
     
     // Subscribe to new messages
     const messagesChannel = supabase
@@ -358,6 +359,7 @@ export default function ChatScreen() {
   useEffect(() => {
     if (currentUserId && chatId) {
       markAsRead();
+      loadMessages();
     }
     
     // Track active chat for notifications
@@ -601,27 +603,50 @@ export default function ChatScreen() {
         
         setChatCreatedBy(chatData.created_by);
         chatCreatedByRef.current = chatData.created_by;
-      }
-
-      // Get other participant
-      const { data: otherParticipant } = await supabase
-        .from('chat_participants')
-        .select('user_id')
-        .eq('chat_id', chatId)
-        .neq('user_id', user.id)
-        .single();
-
-      if (otherParticipant) {
-        otherUserIdRef.current = otherParticipant.user_id;
-        const { data: userData } = await supabase
-          .from('users')
-          .select('*')
-          .eq('id', otherParticipant.user_id)
-          .single();
-        setOtherUser(userData);
         
-        // Set up real-time subscription for other user's status
-        setupUserStatusSubscription(otherParticipant.user_id);
+        if (chatData.is_group) {
+             setIsGroup(true);
+             setGroupInfo({ name: chatData.name, photo_url: chatData.photo_url });
+             
+             // Fetch all participants
+             const { data: partData } = await supabase
+                .from('chat_participants')
+                .select('user_id')
+                .eq('chat_id', chatId);
+             
+             if (partData) {
+                 const userIds = partData.map(p => p.user_id);
+                 const { data: users } = await supabase
+                    .from('users')
+                    .select('*')
+                    .in('id', userIds);
+                 
+                 const pMap = new Map<string, User>();
+                 users?.forEach(u => pMap.set(u.id, u));
+                 setParticipants(pMap);
+             }
+        } else {
+            // Get other participant (1:1)
+            const { data: otherParticipant } = await supabase
+                .from('chat_participants')
+                .select('user_id')
+                .eq('chat_id', chatId)
+                .neq('user_id', user.id)
+                .single();
+    
+            if (otherParticipant) {
+                otherUserIdRef.current = otherParticipant.user_id;
+                const { data: userData } = await supabase
+                .from('users')
+                .select('*')
+                .eq('id', otherParticipant.user_id)
+                .single();
+                setOtherUser(userData);
+                
+                // Set up real-time subscription for other user's status
+                setupUserStatusSubscription(otherParticipant.user_id);
+            }
+        }
       }
     } catch (error) {
       console.error('Error loading chat details:', error);
@@ -677,11 +702,29 @@ export default function ChatScreen() {
 
   const loadMessages = async () => {
     try {
-      const { data, error } = await supabase
+      if (!currentUserId && !currentUserIdRef.current) return;
+
+      // 1. Get join date to filter history
+      const { data: membership } = await supabase
+          .from('chat_participants')
+          .select('joined_at')
+          .eq('chat_id', chatId)
+          .eq('user_id', currentUserId || currentUserIdRef.current) 
+          .single();
+
+      // 2. Build Query
+      let query = supabase
         .from('messages')
         .select('*')
         .eq('chat_id', chatId)
         .order('created_at', { ascending: false });
+
+      // 3. Apply Filter
+      if (membership?.joined_at) {
+          query = query.gte('created_at', membership.joined_at);
+      }
+
+      const { data, error } = await query;
 
       if (error) {
         console.error('Error loading messages:', error);
@@ -1398,27 +1441,32 @@ export default function ChatScreen() {
          rightThreshold={40}
        >
          <TouchableOpacity 
-           style={[styles.messageRow, isMe && styles.messageRowMe]}
+           style={[styles.messageRow, isMe && styles.messageRowMe, { marginBottom: 0 }]}
            onPress={handleDoubleTap}
            onLongPress={() => setSelectedMessage(item)}
            activeOpacity={0.9}
          >
            <View style={{ maxWidth: '80%' }}>
-             <View style={[
-               styles.messageBubble, 
-               isMe ? styles.bubbleMe : styles.bubbleOther,
-               { backgroundColor: isMe ? colors.accent : colors.bubbleOther }
-             ]}>
-               {/* Quoted message if replying */}
-               {repliedMessage && (
-                 <View style={[styles.quotedMessage, { backgroundColor: isMe ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.1)' }]}>
-                   <Text style={[styles.quotedText, { color: isMe ? 'rgba(255,255,255,0.8)' : colors.textMuted }]} numberOfLines={2}>
-                     {repliedMessage.text}
-                   </Text>
-                 </View>
-               )}
-               <Text style={[styles.messageText, { color: isMe ? colors.bubbleTextMe : colors.bubbleTextOther }]}>{item.text}</Text>
-             </View>
+            {isGroup && !isMe && (
+                <Text style={{ fontSize: 10, color: colors.accent, marginBottom: 4, marginLeft: 2, fontWeight: 'bold' }}>
+                    {participants.get(item.user_id)?.display_name || 'User'}
+                </Text>
+            )}
+            <View style={[
+              styles.messageBubble, 
+              isMe ? styles.bubbleMe : styles.bubbleOther,
+              { backgroundColor: isMe ? colors.accent : colors.bubbleOther }
+            ]}>
+              {/* Quoted message if replying */}
+              {repliedMessage && (
+                <View style={[styles.quotedMessage, { backgroundColor: isMe ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.1)' }]}>
+                  <Text style={[styles.quotedText, { color: isMe ? 'rgba(255,255,255,0.8)' : colors.textMuted }]} numberOfLines={2}>
+                    {repliedMessage.text}
+                  </Text>
+                </View>
+              )}
+              <Text style={[styles.messageText, { color: isMe ? colors.bubbleTextMe : colors.bubbleTextOther }]}>{item.text}</Text>
+            </View>
              {/* Reactions display */}
              {messageReactions.length > 0 && (
                <View style={[styles.reactionsContainer, isMe && styles.reactionsContainerMe]}>
@@ -1459,7 +1507,12 @@ export default function ChatScreen() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-    <View style={[styles.container, { backgroundColor: colors.background }]}>
+      <KeyboardAvoidingView 
+        style={{ flex: 1 }} 
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+      >
+        <View style={[styles.container, { backgroundColor: colors.background }]}>
       <StatusBar barStyle={isDark ? "light-content" : "dark-content"} />
       
       {/* Header */}
@@ -1476,20 +1529,33 @@ export default function ChatScreen() {
           onPress={() => router.push({ pathname: '/(app)/chat/details', params: { chatId } })}
         >
           <View style={[styles.headerAvatar, { backgroundColor: colors.surfaceSecondary }]}>
-            {otherUser?.photo_url ? (
-              <Image source={{ uri: otherUser.photo_url }} style={styles.headerAvatarImage} />
+            {isGroup ? (
+                groupInfo.photo_url ? (
+                    <Image source={{ uri: groupInfo.photo_url }} style={styles.headerAvatarImage} />
+                ) : (
+                    <Text style={[styles.headerAvatarText, { color: colors.text }]}>
+                        {groupInfo.name?.[0] || 'G'}
+                    </Text>
+                )
             ) : (
-              <Text style={[styles.headerAvatarText, { color: colors.text }]}>
-                {otherUser?.display_name?.[0] || 'U'}
-              </Text>
+                otherUser?.photo_url ? (
+                  <Image source={{ uri: otherUser.photo_url }} style={styles.headerAvatarImage} />
+                ) : (
+                  <Text style={[styles.headerAvatarText, { color: colors.text }]}>
+                    {otherUser?.display_name?.[0] || 'U'}
+                  </Text>
+                )
             )}
           </View>
           <View style={styles.headerInfo}>
-            <Text style={[styles.headerName, { color: colors.text }]}>{otherUser?.display_name || 'User'}</Text>
-            <Text style={{ fontSize: 12, color: colors.textMuted, opacity: 0.7, fontFamily: 'Sebino-Regular' }}>
-                {otherUser?.username ? `@${otherUser.username}` : ''}
+            <Text style={[styles.headerName, { color: colors.text }]}>
+                {isGroup ? (groupInfo.name || 'Group Chat') : (otherUser?.display_name || 'User')}
             </Text>
-
+            {!isGroup && (
+                <Text style={{ fontSize: 12, color: colors.textMuted, opacity: 0.7, fontFamily: 'Sebino-Regular' }}>
+                    {otherUser?.username ? `@${otherUser.username}` : ''}
+                </Text>
+            )}
           </View>
         </TouchableOpacity>
 
@@ -1520,12 +1586,16 @@ export default function ChatScreen() {
         data={messages}
         renderItem={renderMessage}
         keyExtractor={item => item.id}
-        contentContainerStyle={styles.messagesList}
+        contentContainerStyle={[
+          styles.messagesList, 
+          messages.length === 0 && { flexGrow: 1, justifyContent: 'center' }
+        ]}
         showsVerticalScrollIndicator={false}
         inverted
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         ListFooterComponent={() => (
+          isGroup ? <View style={{ height: 40 }} /> : (
           <View style={{ alignItems: 'center', paddingVertical: 40, paddingHorizontal: 20 }}>
             <View style={{ width: 96, height: 96, borderRadius: 48, backgroundColor: colors.surfaceSecondary, marginBottom: 16, justifyContent: 'center', alignItems: 'center' }}>
                 {otherUser?.photo_url ? (
@@ -1541,25 +1611,36 @@ export default function ChatScreen() {
                 @{otherUser?.username}
             </Text>
             <TouchableOpacity 
-              style={{ backgroundColor: colors.surfaceSecondary, paddingHorizontal: 24, paddingVertical: 10, borderRadius: 8 }}
+              style={{ 
+                backgroundColor: colors.background, 
+                paddingHorizontal: 16, 
+                paddingVertical: 6, 
+                borderRadius: 20,
+                borderWidth: 1,
+                borderColor: 'rgba(255,255,255,0.2)' 
+              }}
               onPress={() => router.push({ pathname: '/(app)/chat/details', params: { chatId } })}
             >
-                <Text style={{ color: colors.text, fontWeight: '600', fontFamily: 'Sebino-Regular' }}>View Profile</Text>
+                <Text style={{ color: colors.text, fontWeight: '600', fontFamily: 'Sebino-Regular', fontSize: 13 }}>View Profile</Text>
             </TouchableOpacity>
           </View>
+          )
         )}
         ListHeaderComponent={() => (
-          otherUserTyping ? (
-            <View style={[styles.messageRow, { marginTop: 8, marginBottom: 8 }]}>
-              <View style={[
-                styles.messageBubble, 
-                styles.bubbleOther,
-                { backgroundColor: colors.bubbleOther, paddingVertical: 12, paddingHorizontal: 16 }
-              ]}>
-                <TypingIndicator color={colors.textMuted} dotSize={6} />
+          <View>
+            <View style={{ height: 10 }} />
+            {otherUserTyping ? (
+              <View style={[styles.messageRow, { marginTop: 8, marginBottom: 8 }]}>
+                <View style={[
+                  styles.messageBubble, 
+                  styles.bubbleOther,
+                  { backgroundColor: colors.bubbleOther, paddingVertical: 12, paddingHorizontal: 16 }
+                ]}>
+                  <TypingIndicator color={colors.textMuted} dotSize={6} />
+                </View>
               </View>
-            </View>
-          ) : null
+            ) : null}
+          </View>
         )}
       />
 
@@ -2237,7 +2318,8 @@ export default function ChatScreen() {
         </TouchableWithoutFeedback>
       </Modal>
 
-    </View>
+        </View>
+      </KeyboardAvoidingView>
     </GestureHandlerRootView>
   );
 }
@@ -2318,11 +2400,10 @@ const styles = StyleSheet.create({
   },
   messagesList: {
     paddingHorizontal: 16,
-    paddingBottom: 16,
+    paddingBottom: 10,
   },
   messageRow: {
     flexDirection: 'row',
-    marginBottom: 12,
     alignItems: 'flex-end',
   },
   messageRowMe: {

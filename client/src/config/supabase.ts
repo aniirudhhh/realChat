@@ -38,6 +38,10 @@ export interface Chat {
   auto_delete_preference?: 'off' | 'close' | '24h' | '7d';
   status: 'active' | 'request' | 'blocked';
   created_by: string | null;
+  name?: string | null;
+  photo_url?: string | null;
+  is_group?: boolean;
+  admin_ids?: string[];
 }
 
 export interface Message {

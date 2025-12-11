@@ -1,24 +1,55 @@
-import { useAudioPlayer } from 'expo-audio';
-import { useEffect } from 'react';
+import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
+import { useEffect, useRef } from 'react';
 import { AppState } from 'react-native';
 
 export const useChatSounds = () => {
-  // Load sounds
-  const sendSound = useAudioPlayer(require('../../assets/send-tone.wav'));
-  const receiveSound = useAudioPlayer(require('../../assets/new-noti.mp3'));
+  const sendSoundRef = useRef<Audio.Sound | null>(null);
+  const receiveSoundRef = useRef<Audio.Sound | null>(null);
 
-  // Simple play wrappers that ensure sound resets to start because expo-audio doesn't auto-reset
-  const playSendSound = () => {
-    if (sendSound) {
-      sendSound.seekTo(0);
-      sendSound.play();
+  useEffect(() => {
+    // Configure mix mode to Duck background audio (e.g. YouTube)
+    Audio.setAudioModeAsync({
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      interruptionModeIOS: InterruptionModeIOS.MixWithOthers,
+      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+      shouldDuckAndroid: true,
+    }).catch(err => console.log('Audio mode error:', err));
+
+    // Preload sounds
+    const loadSounds = async () => {
+      try {
+        const { sound: send } = await Audio.Sound.createAsync(require('../../assets/send-tone.wav'));
+        const { sound: receive } = await Audio.Sound.createAsync(require('../../assets/new-noti.mp3'));
+        sendSoundRef.current = send;
+        receiveSoundRef.current = receive;
+      } catch (error) {
+        console.log('Error loading chat sounds:', error);
+      }
+    };
+    loadSounds();
+
+    return () => {
+      sendSoundRef.current?.unloadAsync();
+      receiveSoundRef.current?.unloadAsync();
+    };
+  }, []);
+
+  const playSendSound = async () => {
+    try {
+      await sendSoundRef.current?.replayAsync();
+    } catch (error) {
+      console.log('Error playing send sound:', error);
     }
   };
 
-  const playReceiveSound = () => {
-    if (receiveSound && AppState.currentState === 'active') {
-      receiveSound.seekTo(0);
-      receiveSound.play();
+  const playReceiveSound = async () => {
+    if (AppState.currentState === 'active') {
+      try {
+        await receiveSoundRef.current?.replayAsync();
+      } catch (error) {
+        console.log('Error playing receive sound:', error);
+      }
     }
   };
 

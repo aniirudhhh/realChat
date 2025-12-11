@@ -39,13 +39,7 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "plugins": [
-      "expo-router",
-      "expo-audio",
-      "expo-av",
-      "expo-notifications",
-      "expo-font"
-    ],
+    "plugins": ["expo-router", "expo-av", "expo-notifications", "expo-font"],
     "scheme": "realchat",
     "extra": {
       "router": {},

@@ -49,6 +49,9 @@ interface ChatWithDetails {
   };
   status?: 'active' | 'request' | 'blocked';
   created_by?: string | null;
+  name?: string | null;
+  photo_url?: string | null;
+  is_group?: boolean;
 }
 
 export default function ChatListScreen() {
@@ -245,22 +248,24 @@ export default function ChatListScreen() {
           .eq('id', chatId)
           .single();
 
-        // Get other participant
-        const { data: otherParticipant } = await supabase
-          .from('chat_participants')
-          .select('user_id')
-          .eq('chat_id', chatId)
-          .neq('user_id', user.id)
-          .single();
-
+        // Get other participant (only for 1:1 chats)
         let otherUser = null;
-        if (otherParticipant) {
-          const { data } = await supabase
-            .from('users')
-            .select('*')
-            .eq('id', otherParticipant.user_id)
+        if (!chat.is_group) {
+          const { data: otherParticipant } = await supabase
+            .from('chat_participants')
+            .select('user_id')
+            .eq('chat_id', chatId)
+            .neq('user_id', user.id)
             .single();
-          otherUser = data;
+  
+          if (otherParticipant) {
+            const { data } = await supabase
+              .from('users')
+              .select('*')
+              .eq('id', otherParticipant.user_id)
+              .single();
+            otherUser = data;
+          }
         }
 
         // Get last message
@@ -470,6 +475,13 @@ export default function ChatListScreen() {
     const otherUser = item.other_user;
     const isOtherUserTyping = typingUsers[item.id];
     
+    // Determine display name and photo
+    const isGroup = item.is_group;
+    const displayName = isGroup 
+      ? (item.name || 'Group Chat') 
+      : (otherUser?.display_name || otherUser?.username || 'User');
+    const photoUrl = isGroup ? item.photo_url : otherUser?.photo_url;
+
     return (
       <TouchableOpacity
         style={[styles.chatItem, { borderBottomColor: colors.border }]}
@@ -478,20 +490,23 @@ export default function ChatListScreen() {
         activeOpacity={0.7}
       >
         <View style={styles.avatarContainer}>
-          {otherUser?.photo_url ? (
-            <Image source={{ uri: otherUser.photo_url }} style={styles.avatarImage} />
+          {photoUrl ? (
+            <Image source={{ uri: photoUrl }} style={styles.avatarImage} />
           ) : (
             <View style={[styles.avatar, { backgroundColor: colors.surfaceSecondary }]}>
-              <Text style={[styles.avatarText, { color: colors.text }]}>{getInitials(otherUser?.display_name)}</Text>
+              <Text style={[styles.avatarText, { color: colors.text }]}>{getInitials(displayName)}</Text>
             </View>
           )}
+          {item.is_group ? null : null}
         </View>
-
         <View style={styles.chatInfo}>
           <View style={styles.chatHeader}>
-            <Text style={[styles.userName, { color: colors.text }]}>{otherUser?.display_name || 'User'}</Text>
-            <Text style={[styles.time, { color: colors.textMuted }]}>{formatTime(item.last_message?.created_at)}</Text>
+            <Text style={[styles.userName, { color: colors.text }]}>{displayName}</Text>
+            <Text style={[styles.time, { color: colors.textMuted }]}>
+              {formatTime(item.last_message?.created_at || item.updated_at)}
+            </Text>
           </View>
+          
           {isOtherUserTyping ? (
             <Text style={[styles.lastMessage, styles.typingIndicator, { color: colors.accent }]} numberOfLines={1}>
               typing...
@@ -555,10 +570,10 @@ export default function ChatListScreen() {
         <Text style={[styles.headerTitle, { color: colors.text, fontSize: 32, fontFamily: 'Sebino-Regular' }]}>Messages</Text>
         <TouchableOpacity 
           style={styles.menuButton}
-          onPress={() => router.push('/(app)/new-chat')}
+          onPress={() => router.push('/(app)/profile')}
         >
           <Image 
-            source={require('../../assets/icons/icons8-add-friend-96.png')} 
+            source={require('../../assets/icons/profile.png')} 
             style={{ width: 30, height: 30, tintColor: colors.text }} 
           />
         </TouchableOpacity>
@@ -578,13 +593,13 @@ export default function ChatListScreen() {
 
       {/* Tabs */}
       {searchQuery.length === 0 && (
-         <View style={{ flexDirection: 'row', paddingHorizontal: 16, marginBottom: 16, gap: 10 }}>
+         <View style={{ flexDirection: 'row', paddingHorizontal: 16, marginBottom: 16, gap: 8 }}>
             <TouchableOpacity 
                onPress={() => setActiveTab('inbox')}
                style={{ 
-                  backgroundColor: activeTab === 'inbox' ? colors.surfaceSecondary : 'transparent',
+                  backgroundColor: activeTab === 'inbox' ? (isDark ? '#1e1e1e' : '#e0e0e0') : 'transparent',
                   paddingVertical: 6,
-                  paddingHorizontal: 14,
+                  paddingHorizontal: 12,
                   borderRadius: 20,
                   borderWidth: 1,
                   borderColor: colors.border
@@ -600,9 +615,9 @@ export default function ChatListScreen() {
             <TouchableOpacity 
                onPress={() => setActiveTab('requests')}
                style={{ 
-                  backgroundColor: activeTab === 'requests' ? colors.surfaceSecondary : 'transparent',
+                  backgroundColor: activeTab === 'requests' ? (isDark ? '#1e1e1e' : '#e0e0e0') : 'transparent',
                   paddingVertical: 6,
-                  paddingHorizontal: 14,
+                  paddingHorizontal: 12,
                   borderRadius: 20,
                   flexDirection: 'row',
                   alignItems: 'center',
@@ -622,6 +637,32 @@ export default function ChatListScreen() {
                   </View>
                )}
             </TouchableOpacity>
+
+            <TouchableOpacity 
+               onPress={() => router.push('/(app)/new-chat')}
+               style={{ 
+                  backgroundColor: 'transparent',
+                  paddingVertical: 6,
+                  paddingHorizontal: 12,
+                  borderRadius: 20,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 6,
+                  borderWidth: 1,
+                  borderColor: colors.border
+               }}
+            >
+               <Image 
+                 source={require('../../assets/icons/icons8-add-friend-96.png')} 
+                 style={{ width: 16, height: 16, tintColor: colors.text }} 
+               />
+               <Text style={{ 
+                  color: colors.text,
+                  fontWeight: '400',
+                  fontSize: 14
+               }}>New Chat</Text>
+            </TouchableOpacity>
+
          </View>
       )}
 
@@ -771,7 +812,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     paddingHorizontal: 16,
     paddingVertical: 2,
-    borderRadius: 25,
+    borderRadius: 15,
   },
   searchIcon: {
     marginRight: 8,
@@ -793,17 +834,17 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   avatar: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
     backgroundColor: COLORS.ironGrey,
     justifyContent: 'center',
     alignItems: 'center',
   },
   avatarImage: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
   },
   avatarText: {
     fontSize: 18,
@@ -811,17 +852,7 @@ const styles = StyleSheet.create({
     color: COLORS.brightSnow,
     fontFamily: 'Sebino-Regular',
   },
-  onlineIndicator: {
-    position: 'absolute',
-    bottom: 2,
-    right: 2,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: COLORS.online,
-    borderWidth: 2,
-    borderColor: COLORS.carbonBlack,
-  },
+
   chatInfo: {
     flex: 1,
   },
@@ -832,7 +863,7 @@ const styles = StyleSheet.create({
   },
   userName: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: 'bold',
     color: COLORS.brightSnow,
     fontFamily: 'Sebino-Regular',
   },
